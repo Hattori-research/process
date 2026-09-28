@@ -1,0 +1,10 @@
+*.jpg
+*.ipynb_checkpoints
+*.ipynb
+*.png
+*.csv
+*.pth
+*.mp4
+Data/
+__pycache__/
+*.pyc
