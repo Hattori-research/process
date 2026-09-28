@@ -22,6 +22,7 @@ angle_scaler     = "Data/Weights/angle_scaler.pkl"
 rel_coord_scaler = "Data/Weights/rel_coord_scaler.pkl"
 control_results  = "Data/control_results"
 control_video    = "Data/control_results/video"
+triangulation_check = "Data/triangulation_check"   # check_triangulation.py の記録先
 
 [system]
 sampling_rate = 20.0  # [Hz]
@@ -49,13 +50,22 @@ baseline_calc = -1.0  # [auto] 校正で求まった基線長 |T| [mm]（-1 = �
 calibrated_at = ""    # [auto] 実行日時
 
 [triangulation]  # 3次元座標計算（実測値）
-cam_offset        = [-280.8, 84.4, -62.7]  # 左カメラの絶対座標 [mm]（X=奥行正, Y=水平左正, Z=鉛直下正）
+method            = "calibrated"           # "calibrated"（R,T を使う三角測量）/ "legacy"（B_eff による旧方式。2026-09-28 以前のデータはこちら）
+calib_rot_top     = 3                      # 実行時フレーム → キャリブ時フレームの時計回り90°回転回数（上カメラ）。2026-09-28 エピポーラ誤差で判定
+calib_rot_under   = 3                      # 同上（下カメラ）
+max_epipolar_px   = 3.0                    # calibrated: エピポーラ誤差がこれを超えた検出は捨てる [px]
+cam_offset        = [-280.8, 84.4, -62.7]  # legacy 用：左カメラの絶対座標 [mm]（X=奥行正, Y=水平左正, Z=鉛直下正）
+cam_offset_calibrated = [-285.2, 4.7, 15.8]  # [auto] calibrated 用。原点 = 自然状態のマーカ先端。check_triangulation.py の [o] で自然状態から再設定
 hand_eye_cal      = [0.0, 0.0, 0.0]        # cam_offset への追加補正 [mm]
 actual_baseline   = 31.73                  # 実測の基線長 [mm]（scale_factor = actual / |T|）
-natural_disp_norm = 0.1808                 # 自然状態での正規化視差（実測）
+natural_disp_norm = 0.1808                 # 自然状態での正規化視差（実測）※legacy のみ使用
 natural_depth     = 277.0                  # 自然状態でのマーカ奥行き [mm]（定規で実測。カメラ由来の値は信用できないため）B_eff = natural_disp_norm * natural_depth
-min_disp_norm     = 0.1                    # これより視差が小さい場合は計測失敗扱い
+min_disp_norm     = 0.1                    # これより視差が小さい場合は計測失敗扱い ※legacy のみ使用
 ema_alpha         = 0.3                    # 指数移動平均の係数
+
+[triangulation_check]  # step1 check_triangulation.py
+avg_frames = 20    # 記録・原点設定で平均するフレーム数
+max_std    = 1.0   # 平均中の標準偏差（calibrated, 各軸）がこれを超えたら「動いている」とみなし記録しない [mm]
 
 [kalman]
 measurement_noise      = 0.05

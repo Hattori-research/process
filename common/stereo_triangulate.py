@@ -18,20 +18,36 @@ class StereoTracker:
         if cam_under_idx is None:
             cam_under_idx = self.cam_cfg["under_idx"]
 
-        # 左カメラの絶対座標 (X=奥行方向が正, Y=水平左が正, Z=鉛直下が正) [mm]
-        CAM_OFFSET = np.array(tri["cam_offset"])
+        # 三角測量の方式（"calibrated" = R,T を使った三角測量 / "legacy" = 実測 B_eff による旧方式）
+        self.method = tri["method"]
+        if self.method not in ("calibrated", "legacy"):
+            raise ValueError(f"[triangulation] method が不正です: {self.method}")
+
+        # 左カメラの絶対座標 (X=奥行方向が正, Y=水平左が正, Z=鉛直下が正) [mm]（方式ごと）
         self.FILTER_ALPHA = tri["ema_alpha"]
         self.smoothed_pos = None
 
         # 最新のハンドアイキャリブレーション値を適用
         HAND_EYE_CAL = np.array(tri["hand_eye_cal"])
-        self.CAM_OFFSET = CAM_OFFSET + HAND_EYE_CAL
+        self.CAM_OFFSETS = {
+            "legacy":     np.array(tri["cam_offset"]) + HAND_EYE_CAL,
+            "calibrated": np.array(tri["cam_offset_calibrated"]) + HAND_EYE_CAL,
+        }
+        self.CAM_OFFSET = self.CAM_OFFSETS[self.method]
+        # 実行時フレームをキャリブ時フレームに合わせるための時計回り90°回転の回数
+        self.calib_rot_top   = tri["calib_rot_top"]
+        self.calib_rot_under = tri["calib_rot_under"]
+        self.max_epipolar_px = tri["max_epipolar_px"]
 
-        # 三角測量の実測パラメータ
+        # 三角測量の実測パラメータ（legacy 用）
         self.actual_baseline   = tri["actual_baseline"]
         self.natural_disp_norm = tri["natural_disp_norm"]
         self.natural_depth     = tri["natural_depth"]
         self.min_disp_norm     = tri["min_disp_norm"]
+
+        # 診断用：直近フレームの両方式の結果（フィルタ前、ロボット座標）とエピポーラ誤差
+        self.last_raw = {"legacy": None, "calibrated": None}
+        self.last_epipolar_px = None
 
         # マーカ検出パラメータ
         self.lower_green = np.array(mk["hsv_lower"], dtype=np.uint8)
@@ -63,6 +79,15 @@ class StereoTracker:
             # ステレオキャリブレーションで得られたP1, P2を直接使用
             self.P1_calib = params['P1']
             self.P2_calib = params['P2']
+
+            # calibrated 方式用：正規化座標での投影行列と基本行列
+            T = self.T.reshape(3, 1)
+            self.P_left  = np.hstack([np.eye(3), np.zeros((3, 1))])
+            self.P_right = np.hstack([self.R, T])
+            tx = np.array([[0, -T[2, 0], T[1, 0]],
+                           [T[2, 0], 0, -T[0, 0]],
+                           [-T[1, 0], T[0, 0], 0]])
+            self.E = tx @ self.R
         except Exception as e:
             print("Error loading stereo_params.npz. Please recalibrate.")
             raise e
@@ -76,8 +101,9 @@ class StereoTracker:
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cam_cfg["height"])
 
 # 変更後（55〜67行目）
-    def _transform_to_robot_coords(self, cam_x, cam_y, cam_z):
+    def _transform_to_robot_coords(self, cam_x, cam_y, cam_z, method=None):
         """カメラローカル座標をロボットの絶対座標（右手系）に変換"""
+        offset = self.CAM_OFFSETS[method] if method else self.CAM_OFFSET
 
         # R1はrectified画像用のためここでは使用しない
         # 直接三角測量結果をそのまま使用
@@ -91,9 +117,9 @@ class StereoTracker:
         rob_z_base = -rect_x
         
         # カメラの位置オフセットを加算
-        rob_x = rob_x_base + self.CAM_OFFSET[0]
-        rob_y = rob_y_base + self.CAM_OFFSET[1]
-        rob_z = rob_z_base + self.CAM_OFFSET[2]
+        rob_x = rob_x_base + offset[0]
+        rob_y = rob_y_base + offset[1]
+        rob_z = rob_z_base + offset[2]
         
         return np.array([rob_x, rob_y, rob_z])
 
@@ -112,10 +138,78 @@ class StereoTracker:
             if cv2.contourArea(c) > self.min_contour_area:
                 M = cv2.moments(c)
                 if M["m00"] != 0:
-                    cX = int(M["m10"] / M["m00"])
-                    cY = int(M["m01"] / M["m00"])
+                    # サブピクセル精度の重心（legacy 方式では従来どおり int に切り捨てて使う）
+                    cX = M["m10"] / M["m00"]
+                    cY = M["m01"] / M["m00"]
                     return (cX, cY)
         return None
+
+    @staticmethod
+    def _rotate_pt_cw(pt, shape, k):
+        """画像を時計回りに90°×k 回転したときの画素座標を返す（shape は回転前の画像）"""
+        u, v = pt
+        h, w = shape[:2]
+        for _ in range(k % 4):
+            u, v = h - 1 - v, u
+            h, w = w, h
+        return np.array([u, v], dtype=np.float64)
+
+    @staticmethod
+    def _rotate_cam_cw(p, k):
+        """画像を時計回りに90°×k 回転したときのカメラ座標 (x, y, z) を返す"""
+        x, y, z = p
+        for _ in range(k % 4):
+            x, y = -y, x
+        return np.array([x, y, z])
+
+    def _triangulate_legacy(self, center_l, center_r):
+        """旧方式：実行時フレームの正規化座標の視差と実測 B_eff から奥行きを求める（カメラ座標を返す）"""
+        pt_l_raw = np.array([[[int(center_l[0]), int(center_l[1])]]], dtype=np.float64)
+        pt_r_raw = np.array([[[int(center_r[0]), int(center_r[1])]]], dtype=np.float64)
+
+        # 正規化座標（歪み補正のみ）
+        pt_l_norm = cv2.undistortPoints(pt_l_raw, self.M1, self.D1)[0][0]
+        pt_r_norm = cv2.undistortPoints(pt_r_raw, self.M2, self.D2)[0][0]
+
+        disparity_norm = pt_l_norm[0] - pt_r_norm[0]
+
+        # 視差が小さすぎる場合はスキップ
+        if abs(disparity_norm) < 1e-4 or abs(disparity_norm) < self.min_disp_norm:
+            return None
+
+        # 実行時フレームにキャリブ時の内部パラメータを当てているため視差にスケール誤差が出る。
+        # 自然状態の実測値（config.toml [triangulation]）で補正する
+        B_eff = self.natural_disp_norm * self.natural_depth
+        cam_z = B_eff / abs(disparity_norm)
+        cam_x = pt_l_norm[0] * cam_z
+        cam_y = pt_l_norm[1] * cam_z
+        return np.array([cam_x, cam_y, cam_z])
+
+    def _triangulate_calibrated(self, center_l, center_r, shape_l, shape_r):
+        """
+        新方式：重心をキャリブ時フレームの画素座標に戻し、R,T を使って三角測量する。
+        返り値は実行時フレームの向きに合わせたカメラ座標（legacy と同じ軸）。
+        """
+        ql = self._rotate_pt_cw(center_l, shape_l, self.calib_rot_top)
+        qr = self._rotate_pt_cw(center_r, shape_r, self.calib_rot_under)
+        nl = cv2.undistortPoints(ql.reshape(1, 1, 2), self.M1, self.D1).reshape(2)
+        nr = cv2.undistortPoints(qr.reshape(1, 1, 2), self.M2, self.D2).reshape(2)
+
+        # エピポーラ誤差（Sampson 距離を画素換算）：左右で別の物体を拾った場合などを除外
+        xl, xr = np.array([nl[0], nl[1], 1.0]), np.array([nr[0], nr[1], 1.0])
+        Ex, Etx = self.E @ xl, self.E.T @ xr
+        denom = np.sqrt(Ex[0]**2 + Ex[1]**2 + Etx[0]**2 + Etx[1]**2)
+        self.last_epipolar_px = abs(xr @ self.E @ xl) / denom * self.M1[0, 0]
+        if self.last_epipolar_px > self.max_epipolar_px:
+            return None
+
+        X4 = cv2.triangulatePoints(self.P_left, self.P_right,
+                                   nl.reshape(2, 1), nr.reshape(2, 1))
+        X = (X4[:3] / X4[3]).ravel()
+        if X[2] <= 0:
+            return None
+        # キャリブ時フレーム → 実行時フレームの軸（キャリブ時 = 実行時を k 回回転 → 逆に 4-k 回）
+        return self._rotate_cam_cw(X, 4 - self.calib_rot_top)
 
     def get_3d_coordinates_and_frames(self):
         self.cap_top.grab()
@@ -147,37 +241,23 @@ class StereoTracker:
 
         current_pos = None
 
+        self.last_raw = {"legacy": None, "calibrated": None}
+        self.last_epipolar_px = None
+
         if center_l and center_r:
-            # 変更後
-            pt_l_raw = np.array([[[center_l[0], center_l[1]]]], dtype=np.float64)
-            pt_r_raw = np.array([[[center_r[0], center_r[1]]]], dtype=np.float64)
+            # 両方式で計算（診断用に last_raw に残す）。採用するのは self.method の方
+            cam_legacy = self._triangulate_legacy(center_l, center_r)
+            cam_calib  = self._triangulate_calibrated(center_l, center_r,
+                                                      frame_l_calc.shape, frame_r_calc.shape)
+            if cam_legacy is not None:
+                self.last_raw["legacy"] = self._transform_to_robot_coords(*cam_legacy, method="legacy")
+            if cam_calib is not None:
+                self.last_raw["calibrated"] = self._transform_to_robot_coords(*cam_calib, method="calibrated")
 
-            # 変更後
-            # 正規化座標（歪み補正のみ）
-            pt_l_norm = cv2.undistortPoints(pt_l_raw, self.M1, self.D1)[0][0]
-            pt_r_norm = cv2.undistortPoints(pt_r_raw, self.M2, self.D2)[0][0]
-
-            disparity_norm = pt_l_norm[0] - pt_r_norm[0]
-
-            if abs(disparity_norm) < 1e-4:
+            raw_pos = self.last_raw[self.method]
+            if raw_pos is None:
                 return None, frame_l, frame_r
 
-            # 正規化座標系での三角測量
-            # 基線長が約1.54倍になっています。
-            # これはRマトリクスの影響で、2台のカメラが完全に平行でないため
-            # 正規化座標の視差にスケール誤差が生じています。
-            # 実測値から直接補正係数を求めます。
-            # 自然状態でのdisp_norm と奥行きは config.toml [triangulation] で管理
-            B_eff = self.natural_disp_norm * self.natural_depth
-            cam_z = B_eff / abs(disparity_norm)
-            cam_x = pt_l_norm[0] * cam_z
-            cam_y = pt_l_norm[1] * cam_z
-
-            if abs(disparity_norm) < self.min_disp_norm:   # 視差が小さすぎる場合はスキップ
-                return None, frame_l, frame_r
-
-            raw_pos = self._transform_to_robot_coords(cam_x, cam_y, cam_z)
-            
             # 指数移動平均フィルタ
             if self.smoothed_pos is None:
                 self.smoothed_pos = raw_pos
@@ -190,15 +270,13 @@ class StereoTracker:
             h, w = frame_l.shape[:2]
             # 90度時計回り回転の逆変換: (cx, cy) → (cy, w_calc - cx)
             
-            # 変更後
             # top: ROTATE_90_CLOCKWISE の逆変換 (cx,cy) → (cy, w_calc-cx)
             w_calc = frame_l_calc.shape[1]
-            disp_l = (int(center_l[1]), int(w_calc - center_l[0]))
+            disp_l = (int(center_l[1]), int(w_calc - int(center_l[0])))
 
-            # under: ROTATE_90_COUNTERCLOCKWISE の逆変換 (cx,cy) → (h_calc-cy, cx)
-            # 変更後
+            # under: 同上（frame_r は180°回転済みの表示用フレーム）
             w_calc = frame_r_calc.shape[1]
-            disp_r = (int(center_r[1]), int(w_calc - center_r[0]))
+            disp_r = (int(center_r[1]), int(w_calc - int(center_r[0])))
 
             cv2.circle(frame_l, disp_l, 7, (0, 0, 255), -1)
             cv2.circle(frame_r, disp_r, 7, (0, 0, 255), -1)

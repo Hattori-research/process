@@ -60,10 +60,17 @@ process/stepN_<内容>/<スクリプト>.py の形でステップごとに分け
 | HSV_tuner.py | マーカ（緑）のHSV閾値調整。ESC で config.toml [marker] に保存、q で保存せず終了 |
 | common/stereo_triangulate.py | `StereoTracker`（マーカ重心→3次元座標）と `KalmanFilter3D`。step2/5 から import される |
 
-- 座標系: X=奥行が正, Y=水平左が正, Z=鉛直下が正 [mm]。`cam_offset=[-280.8, 84.4, -62.7]` を加算
-- 三角測量は正規化座標の視差から計算し、実効基線 `B_eff = natural_disp_norm(0.1808) * natural_depth(277.0)` の実測値を使用（npz の T・P1/P2 は実質未使用）
-  - natural_disp_norm: 以前どこかのスクリプトで計測した値（スクリプトは現存しない）
-  - natural_depth: カメラ由来の値が信用できないため定規で実測した値
+- 座標系: X=奥行が正, Y=水平左が正, Z=鉛直下が正 [mm]。方式ごとのカメラオフセット（`cam_offset` / `cam_offset_calibrated`）を加算
+- 三角測量の方式は config.toml `[triangulation] method` で切り替え（2026-09-28〜 既定は calibrated）
+  - **calibrated**: 実行時フレーム（縦長）の重心をキャリブ時フレーム（横長）に戻し（`calib_rot_top/under`=3、エピポーラ誤差 0.17px で実測判定）、R,T で `cv2.triangulatePoints`。重心はサブピクセル。エピポーラ誤差 > `max_epipolar_px` の検出は破棄
+  - **legacy**: 実行時フレームにキャリブ時の内部パラメータをそのまま当て、実測 `B_eff = natural_disp_norm(0.1808) * natural_depth(277.0)` で奥行きを補正する旧方式。主点ずれにより奥行きで数十mm、軸間の混ざりも大きい（Z を 10mm 動かすと X が 8mm 動く等）。2026-09-28 以前に取得したデータはこの方式
+  - **ロボット座標の原点 = 自然状態のマーカ先端**（2026-09-28 決定）。`cam_offset_calibrated` は check_triangulation.py の [o] で自然状態から自動設定する
+  - 比較・定規検証ツール: step1_cameracalibration/check_triangulation.py（[SPACE] 記録、[o] 原点設定、`--headless N` で統計のみ）。平均中の std > `[triangulation_check] max_std` なら「動いている」として記録しない
+  - 実機確認（2026-09-28）: legacy は奥行きを縮めて出す（奥行き 310mm で −15mm、370mm 付近で約 −48mm）。calibrated の静止時 std は奥行き 0.5mm・他 0.04mm 以下
+  - チェスボード検証（2026-09-28, check_chessboard_accuracy.py, 奥行き 266〜387mm, 45フレーム）:
+    calibrated は隣接間隔 12.05〜12.14mm（真 12）、端から端 108.1〜108.6 / 71.0〜72.3mm（真 108 / 72）、平面RMS 0.6〜1.1mm。
+    legacy は形状が大きく歪む（端から端 105〜140 / 80〜94mm、平面RMS 18〜23mm）→ **calibrated が正しい。基線長 31.73mm のままで精度は十分（治具の作り直しは不要）**
+  - 動いている物体では左右カメラの取得タイミング差でエピポーラ誤差が 1〜数px に増える（静止時 0.1〜0.3px）
 - 指数移動平均（α=0.3）を内部でかけ、呼び出し側でさらにカルマンフィルタをかけている（二重平滑化）
 - 注意点:
   - 画像の回転処理はスクリプト間で異なる（capture は保存前に回転済み、calibrate は読込後さらに回転、triangulate は上カメラに180°回転なし 等）。**試行錯誤の結果この組み合わせで動作しているので、指示がない限り変更しない**
