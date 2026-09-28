@@ -89,7 +89,11 @@ process/stepN_<内容>/<スクリプト>.py の形でステップごとに分け
   - 目標 72000 サンプル（20Hz×60分）。通信途絶時は自動で再接続して継続
   - マーカ検出時のみ CSV に記録（未検出フレームは欠落 → 時系列に隙間ができうる）
   - CSV列: `Sample_Count, Time, Target_W0-3, Angle_W0-3, Cur_W0-3, X, Y, Z` → `Data/rnn_csv/<下限>_<上限>_<累積上限>_<日時>.csv`
-  - 取得したCSVは手動で `Data/rnn_csv/train/` と `test/` に振り分ける運用
+  - 取得したCSVは split_train_test.py で `Data/rnn_csv/train/` と `test/` に振り分ける
+- split_train_test.py: 1本の長いCSVを時間ブロック（config.toml [split]、既定 5分）に分け、5ブロックに1つを test にする（約 8:2、時間的に偏らない）
+  - 各ブロックの先頭に元ファイルの1行目（自然状態 = ゼロ点）を付ける（step3/4 が各CSVの1行目をゼロ点に使うため）
+  - 分割した元ファイルは `Data/rnn_csv/raw/` に移動。`--dry-run` で振り分けの確認のみ
+- `Data/rnn_csv/legacy/`: 2026-09-28 以前の旧方式（legacy 三角測量・約4fps）のデータ。学習には使わない
 
 ## step3_narx（順モデル学習） train_rnn.py
 - 入力: 過去40ステップの [エンコーダ相対値 A(4) + 相対位置 x(3)] = (40,7)、未来20ステップの目標引張量 W (20,4)

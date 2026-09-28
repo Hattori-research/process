@@ -10,7 +10,8 @@ stereo_params = "step1_cameracalibration/stereo_params.npz"
 calib_images  = "step1_cameracalibration/calibration_images"
 mp4_dir       = "Data/mp4"
 png_dir       = "Data/png"
-rnn_csv_dir   = "Data/rnn_csv"
+rnn_csv_dir   = "Data/rnn_csv"            # data_sampling.py の出力先（分割前）
+raw_csv_dir   = "Data/rnn_csv/raw"        # split_train_test.py で分割済みの元ファイルの移動先
 train_csv_dir = "Data/rnn_csv/train"
 test_csv_dir  = "Data/rnn_csv/test"
 weights_dir   = "Data/Weights"
@@ -94,6 +95,12 @@ pull_total_max    = 30.0    # 累積引張量の上限 [mm]（超えたら全ワ
 save_mode         = "mp4"   # "mp4" または "png"
 save_interval_sec = 600     # 動画ローテーション / スナップショット間隔 [s]
 camera_warmup_sec = 10.0    # カメラ初期化後の待ち時間 [s]
+
+[split]  # step2 split_train_test.py：1本の取得データを時間ブロックで train / test に分ける
+block_minutes = 5.0   # 1ブロックの長さ [min]（行数 = block_minutes × 60 × sampling_rate）
+test_every    = 5     # test_every ブロックごとに1つを test にする（5 → 約 8:2）
+test_index    = 2     # 各グループの何番目（0始まり）を test にするか
+min_block_ratio = 0.5 # 末尾の端数ブロックがこの割合未満なら直前のブロックに結合
 
 # ----------------------------------------------------------
 # 学習（step3〜5 共通）※ 構造に関わる値を変えたら再学習が必要
