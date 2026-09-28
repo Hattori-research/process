@@ -2,20 +2,29 @@
 import numpy as np
 import cv2
 import glob
+import os
+import sys
 
-params = np.load('stereo_params.npz')
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+import config
+
+cfg = config.load()
+
+params = np.load(config.path("stereo_params"))
 M1, D1 = params['cameraMatrix1'], params['distCoeffs1']
 M2, D2 = params['cameraMatrix2'], params['distCoeffs2']
 R, T   = params['R'], params['T']
 
-pattern_size = (7, 10)
-square_size  = 12.0
+# 他スクリプトとは (行, 列) の順で逆にしている（従来どおりの挙動を維持）
+pattern_size = (cfg["chessboard"]["rows"], cfg["chessboard"]["cols"])
+square_size  = cfg["chessboard"]["square_size"]
 objp = np.zeros((pattern_size[0]*pattern_size[1], 3), np.float32)
 objp[:,:2] = np.mgrid[0:pattern_size[0], 0:pattern_size[1]].T.reshape(-1,2)
 objp *= square_size
 
-images_left  = sorted(glob.glob('calibration_images/left_*.jpg'))
-images_right = sorted(glob.glob('calibration_images/right_*.jpg'))
+calib_dir = config.path("calib_images")
+images_left  = sorted(glob.glob(os.path.join(calib_dir, 'left_*.jpg')))
+images_right = sorted(glob.glob(os.path.join(calib_dir, 'right_*.jpg')))
 
 print(f"{'No':>3} {'RMS_L':>7} {'RMS_R':>7}  ファイル名")
 print("-" * 55)

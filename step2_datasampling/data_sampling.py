@@ -7,10 +7,11 @@ import cv2
 
 import sys
 import os
-sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'step1_cameracalibration'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
-from motor_control import MotorController
-from stereo_triangulate import StereoTracker, KalmanFilter3D
+import config
+from common.motor_control import MotorController
+from common.stereo_triangulate import StereoTracker, KalmanFilter3D
 
 shared_data = {
     "pos": None,
@@ -30,7 +31,7 @@ def camera_thread_worker(tracker):
 def create_video_writer(fps=20.0, width=1280, height=720):
     """動画保存用のVideoWriterを生成するヘルパー関数"""
     timestr = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-    filename = f"Data/mp4/{timestr}.mp4"
+    filename = os.path.join(config.path("mp4_dir"), f"{timestr}.mp4")
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     print(f"[Video] 録画を開始します: {filename}")
     return cv2.VideoWriter(filename, fourcc, fps, (width, height))
@@ -39,35 +40,41 @@ def main():
     global shared_data
 
     # 保存先ディレクトリの確保（サブディレクトリもすべて作成）
-    os.makedirs("Data/mp4", exist_ok=True)
-    os.makedirs("Data/png", exist_ok=True)
-    os.makedirs("Data/rnn_csv", exist_ok=True)
-    
-    # --- サンプリング設定 ---
-    SAMPLING_RATE = 20.0 
+    os.makedirs(config.path("mp4_dir"), exist_ok=True)
+    os.makedirs(config.path("png_dir"), exist_ok=True)
+    os.makedirs(config.path("rnn_csv_dir"), exist_ok=True)
+
+    cfg  = config.load()
+    scfg = cfg["sampling"]
+    kcfg = cfg["kalman"]
+
+    # --- サンプリング設定（config.toml [system] [sampling]）---
+    SAMPLING_RATE = cfg["system"]["sampling_rate"]
     INTERVAL = 1.0 / SAMPLING_RATE
-    COMMAND_INTERVAL = 2.0
-    
-    TARGET_SAMPLES = 20 * 60 * 30 # 目標サンプル数（20Hz * 60s * 15minute）
+    COMMAND_INTERVAL = scfg["command_interval"]
+
+    TARGET_SAMPLES = scfg["target_samples"]
     collected_samples = 0
-    
+
     #--引張量の設定
-    under_limit = 0.0
-    upper_limit = 16.0       
-    total_max = 30.0 
+    under_limit = scfg["pull_min"]
+    upper_limit = scfg["pull_max"]
+    total_max = scfg["pull_total_max"]
 
     # --- 画像/動画保存設定 ---
-    SAVE_MODE = "mp4"           # "mp4" または "png" で切り替え
-    SAVE_INTERVAL_SEC = 10 * 60 # 保存間隔：10分
+    SAVE_MODE = scfg["save_mode"]                 # "mp4" または "png" で切り替え
+    SAVE_INTERVAL_SEC = scfg["save_interval_sec"] # 保存間隔 [s]
     video_out = None
     last_save_time = time.time()
 
     # csv保存先
     timestr = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-    csv_filename = f"Data/rnn_csv/{under_limit}_{upper_limit}_{total_max}_{timestr}.csv"
+    csv_filename = os.path.join(config.path("rnn_csv_dir"),
+                                f"{under_limit}_{upper_limit}_{total_max}_{timestr}.csv")
 
 
-    kf = KalmanFilter3D(process_noise=1e-5, measurement_noise=0.05)
+    kf = KalmanFilter3D(process_noise=kcfg["process_noise_sampling"],
+                        measurement_noise=kcfg["measurement_noise"])
 
     # 初回のみCSVのヘッダーを書き込む
     with open(csv_filename, mode='w', newline='') as f:
@@ -90,7 +97,7 @@ def main():
         
         total_tensile = np.zeros(4)
 
-        motor = MotorController(port="COM3", baudrate=115200)
+        motor = MotorController()
         if not motor.connect():
             print("[Warning] シリアル通信の接続に失敗しました。5秒後に再試行します...")
             time.sleep(5.0)
@@ -98,7 +105,7 @@ def main():
         
         print("カメラを初期化しています...")
         try:
-            tracker = StereoTracker(cam_top_idx=1, cam_under_idx=0)
+            tracker = StereoTracker()
         except Exception as e:
             print(f"[Warning] カメラの初期化に失敗しました: {e}。5秒後に再試行します...")
             motor.disconnect()
@@ -106,7 +113,7 @@ def main():
             continue
 
         #ここの時間を長くした
-        time.sleep(10.0)
+        time.sleep(scfg["camera_warmup_sec"])
         shared_data["running"] = True
         cam_thread = threading.Thread(target=camera_thread_worker, args=(tracker,), daemon=True)
         cam_thread.start()
@@ -199,7 +206,7 @@ def main():
                         elif SAVE_MODE == "png":
                             if absolute_time - last_save_time >= SAVE_INTERVAL_SEC:
                                 timestr_img = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-                                img_filename = f"Data/png/{timestr_img}.png"
+                                img_filename = os.path.join(config.path("png_dir"), f"{timestr_img}.png")
                                 cv2.imwrite(img_filename, current_frame)
                                 print(f"\n[Image] 20分経過。スナップショットを保存しました: {img_filename}")
                                 last_save_time = absolute_time

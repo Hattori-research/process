@@ -1,31 +1,50 @@
 import numpy as np
 import os
+import sys
 os.environ["OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS"] = "0"
 import cv2
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+import config
+
 class StereoTracker:
-    def __init__(self, cam_top_idx=1, cam_under_idx=0):
+    def __init__(self, cam_top_idx=None, cam_under_idx=None):
+        cfg = config.load()
+        tri = cfg["triangulation"]
+        mk  = cfg["marker"]
+        self.cam_cfg = cfg["camera"]
+        if cam_top_idx is None:
+            cam_top_idx = self.cam_cfg["top_idx"]
+        if cam_under_idx is None:
+            cam_under_idx = self.cam_cfg["under_idx"]
+
         # 左カメラの絶対座標 (X=奥行方向が正, Y=水平左が正, Z=鉛直下が正) [mm]
-        CAM_OFFSET = np.array([-280.8, 84.4, -62.7])
-        self.FILTER_ALPHA = 0.3
+        CAM_OFFSET = np.array(tri["cam_offset"])
+        self.FILTER_ALPHA = tri["ema_alpha"]
         self.smoothed_pos = None
 
         # 最新のハンドアイキャリブレーション値を適用
-        HAND_EYE_CAL = np.array([0,0,0])
+        HAND_EYE_CAL = np.array(tri["hand_eye_cal"])
         self.CAM_OFFSET = CAM_OFFSET + HAND_EYE_CAL
 
-        # test_track.py と完全に同じHSV閾値に戻す
-        self.lower_green = np.array([83, 12, 121], dtype=np.uint8)
-        self.upper_green = np.array([104, 255, 255], dtype=np.uint8)
+        # 三角測量の実測パラメータ
+        self.actual_baseline   = tri["actual_baseline"]
+        self.natural_disp_norm = tri["natural_disp_norm"]
+        self.natural_depth     = tri["natural_depth"]
+        self.min_disp_norm     = tri["min_disp_norm"]
+
+        # マーカ検出パラメータ
+        self.lower_green = np.array(mk["hsv_lower"], dtype=np.uint8)
+        self.upper_green = np.array(mk["hsv_upper"], dtype=np.uint8)
+        self.morph_kernel     = mk["morph_kernel"]
+        self.min_contour_area = mk["min_contour_area"]
 
         self._load_params()
         self._init_cameras(cam_top_idx, cam_under_idx)
 
     def _load_params(self):
         try:
-            import os
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            params = np.load(os.path.join(base_dir, 'stereo_params.npz'))
+            params = np.load(config.path("stereo_params"))
             self.M1, self.D1 = params['cameraMatrix1'], params['distCoeffs1']
             self.M2, self.D2 = params['cameraMatrix2'], params['distCoeffs2']
             self.R = params['R']
@@ -36,7 +55,7 @@ class StereoTracker:
 
             # 基線長からスケール誤差を自動補正 (test_track.py と同一)
             # 変更後（28〜42行目）
-            ACTUAL_BASELINE = 31.73
+            ACTUAL_BASELINE = self.actual_baseline
             calc_baseline = np.linalg.norm(self.T)
             self.scale_factor = ACTUAL_BASELINE / calc_baseline
             print(f"Calibration parameters loaded successfully. スケール係数 = {self.scale_factor:.3f}")
@@ -53,8 +72,8 @@ class StereoTracker:
         self.cap_under = cv2.VideoCapture(idx_r, cv2.CAP_DSHOW)
         
         for cap in (self.cap_top, self.cap_under):
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cam_cfg["width"])
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cam_cfg["height"])
 
 # 変更後（55〜67行目）
     def _transform_to_robot_coords(self, cam_x, cam_y, cam_z):
@@ -83,14 +102,14 @@ class StereoTracker:
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, self.lower_green, self.upper_green)
         
-        kernel = np.ones((5, 5), np.uint8)
+        kernel = np.ones((self.morph_kernel, self.morph_kernel), np.uint8)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-        
+
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
+
         if contours:
             c = max(contours, key=cv2.contourArea)
-            if cv2.contourArea(c) > 30:
+            if cv2.contourArea(c) > self.min_contour_area:
                 M = cv2.moments(c)
                 if M["m00"] != 0:
                     cX = int(M["m10"] / M["m00"])
@@ -148,13 +167,13 @@ class StereoTracker:
             # これはRマトリクスの影響で、2台のカメラが完全に平行でないため
             # 正規化座標の視差にスケール誤差が生じています。
             # 実測値から直接補正係数を求めます。
-            # 自然状態でのdisp_norm:+0.1808
-            B_eff = 0.1808 * 277.0 
+            # 自然状態でのdisp_norm と奥行きは config.toml [triangulation] で管理
+            B_eff = self.natural_disp_norm * self.natural_depth
             cam_z = B_eff / abs(disparity_norm)
             cam_x = pt_l_norm[0] * cam_z
             cam_y = pt_l_norm[1] * cam_z
 
-            if abs(disparity_norm) < 0.1:   # 視差が小さすぎる場合はスキップ
+            if abs(disparity_norm) < self.min_disp_norm:   # 視差が小さすぎる場合はスキップ
                 return None, frame_l, frame_r
 
             raw_pos = self._transform_to_robot_coords(cam_x, cam_y, cam_z)
@@ -196,27 +215,35 @@ class KalmanFilter3D:
         self.q = process_noise       
         self.r = measurement_noise   
         
-        self.x = np.zeros((3, 2))    
-        self.p = np.eye(2) * 1.0     
-        self.f = np.array([[1, 1], [0, 1]]) 
-        self.h = np.array([[1, 0]])         
+        self.x = np.zeros((3, 2))                    # 各軸 [位置, 速度]
+        self.p = np.stack([np.eye(2) * 1.0] * 3)     # 各軸の共分散 (3, 2, 2)
+        self.f = np.array([[1, 1], [0, 1]])
+        self.h = np.array([[1, 0]])
         self.q_mat = np.eye(2) * self.q
         self.r_mat = np.array([[self.r]])
+        self.initialized = False
 
     def update(self, measurements):
+        # 初回は観測値で位置を初期化（0から立ち上がる過渡応答を防ぐ）
+        if not self.initialized:
+            self.x[:, 0] = measurements[:3]
+            self.x[:, 1] = 0.0
+            self.initialized = True
+            return [self.x[i, 0] for i in range(3)]
+
         filtered_pos = []
         for i in range(3):
             self.x[i] = np.dot(self.f, self.x[i])
-            self.p = np.dot(np.dot(self.f, self.p), self.f.T) + self.q_mat
-            
+            self.p[i] = np.dot(np.dot(self.f, self.p[i]), self.f.T) + self.q_mat
+
             z = np.array([[measurements[i]]])
             y = z - np.dot(self.h, self.x[i].reshape(2, 1))
-            s = np.dot(self.h, np.dot(self.p, self.h.T)) + self.r_mat
-            k = np.dot(np.dot(self.p, self.h.T), np.linalg.inv(s))
-            
+            s = np.dot(self.h, np.dot(self.p[i], self.h.T)) + self.r_mat
+            k = np.dot(np.dot(self.p[i], self.h.T), np.linalg.inv(s))
+
             self.x[i] = self.x[i] + (k @ y).flatten()
-            self.p = self.p - k @ self.h @ self.p
-            
+            self.p[i] = self.p[i] - k @ self.h @ self.p[i]
+
             filtered_pos.append(self.x[i, 0])
         return filtered_pos
 
@@ -227,8 +254,10 @@ if __name__ == "__main__":
     print("StereoTracker 動作確認モード")
     print("操作: [ESC] 終了  [r] CAM_OFFSETリセット")
 
-    tracker = StereoTracker(cam_top_idx=1, cam_under_idx=0)
-    kf = KalmanFilter3D(process_noise=1e-4, measurement_noise=0.05)
+    kcfg = config.load()["kalman"]
+    tracker = StereoTracker()
+    kf = KalmanFilter3D(process_noise=kcfg["process_noise_realtime"],
+                        measurement_noise=kcfg["measurement_noise"])
 
     while True:
         pos, frame_top, frame_under = tracker.get_3d_coordinates_and_frames()

@@ -1,4 +1,5 @@
 import os
+import sys
 import glob
 import pandas as pd
 import numpy as np
@@ -9,24 +10,32 @@ from torch.utils.data import Dataset, DataLoader, random_split
 from sklearn.preprocessing import StandardScaler
 import joblib
 
-# ==========================================
-# 1. ハイパーパラメータ
-# ==========================================
-TRAIN_CSV_DIR = "Data/rnn_csv/train"
-TEST_CSV_DIR  = "Data/rnn_csv/test"
-WEIGHTS_DIR   = "Data/Weights"         
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+import config
+from common.models import TrajectoryNet
 
-PAST_SEQ = 40        # 2秒で十分です！
-FUTURE_SEQ = 20      # 1秒予測
-BATCH_SIZE = 64       
-EPOCHS   = 200
-PATIENCE = 20          
-LEARNING_RATE = 1e-3  
+# ==========================================
+# 1. ハイパーパラメータ（config.toml [model] [narx]）
+# ==========================================
+cfg  = config.load()
+mcfg = cfg["model"]
+ncfg = cfg["narx"]
+
+TRAIN_CSV_DIR = config.path("train_csv_dir")
+TEST_CSV_DIR  = config.path("test_csv_dir")
+WEIGHTS_DIR   = config.path("weights_dir")
+
+PAST_SEQ   = mcfg["past_seq"]      # 2秒
+FUTURE_SEQ = mcfg["future_seq"]    # 1秒予測
+BATCH_SIZE = ncfg["batch_size"]
+EPOCHS     = ncfg["epochs"]
+PATIENCE   = ncfg["patience"]
+LEARNING_RATE = ncfg["learning_rate"]
 
 os.makedirs(WEIGHTS_DIR, exist_ok=True)
 
 class TrajectoryDataset(Dataset):
-    def __init__(self, csv_file_paths, past_seq=40, future_seq=20, is_train=True):
+    def __init__(self, csv_file_paths, past_seq=PAST_SEQ, future_seq=FUTURE_SEQ, is_train=True):
         self.past_seq = past_seq
         self.future_seq = future_seq
         
@@ -38,8 +47,8 @@ class TrajectoryDataset(Dataset):
         all_angle_data = []
         all_coord_data = []
         
-        MOVEMENT_LIMIT = 120.0 
-        CUT_INITIAL_STEPS = 100 
+        MOVEMENT_LIMIT = mcfg["movement_limit"]
+        CUT_INITIAL_STEPS = mcfg["cut_initial_steps"]
         
         print(f"[{len(csv_file_paths)} 個のファイルを読み込みます...]")
         for file in csv_file_paths:
@@ -80,9 +89,9 @@ class TrajectoryDataset(Dataset):
                 
         combined_rel_coords = np.vstack(all_rel_coords)
         
-        target_scaler_path = os.path.join(WEIGHTS_DIR, 'target_scaler.pkl')
-        angle_scaler_path = os.path.join(WEIGHTS_DIR, 'angle_scaler.pkl')
-        rel_coord_scaler_path = os.path.join(WEIGHTS_DIR, 'rel_coord_scaler.pkl')
+        target_scaler_path = config.path("target_scaler")
+        angle_scaler_path = config.path("angle_scaler")
+        rel_coord_scaler_path = config.path("rel_coord_scaler")
         
         if is_train:
             self.target_scaler = StandardScaler().fit(combined_target)
@@ -108,7 +117,7 @@ class TrajectoryDataset(Dataset):
                 future_rel_mm = c_data[t : t + self.future_seq] - current_pos
 
                 # ジャンプ対策：ウィンドウ内の座標変化量が閾値を超えたらスキップ
-                JUMP_THRESH = 150.0  # mm：1ステップの最大変化量
+                JUMP_THRESH = mcfg["jump_thresh"]  # mm：1ステップの最大変化量
                 past_diff   = np.abs(np.diff(past_rel_mm, axis=0)).max()
                 future_diff = np.abs(np.diff(future_rel_mm, axis=0)).max()
                 if past_diff > JUMP_THRESH or future_diff > JUMP_THRESH:
@@ -128,26 +137,7 @@ class TrajectoryDataset(Dataset):
                 torch.tensor(self.w_target_future[idx], dtype=torch.float32),
                 torch.tensor(self.y_future[idx], dtype=torch.float32))
 
-class TrajectoryNet(nn.Module):
-    def __init__(self, past_seq=40, future_seq=20):
-        super(TrajectoryNet, self).__init__()
-        self.future_seq = future_seq
-        self.lstm = nn.LSTM(input_size=7, hidden_size=64, num_layers=2, batch_first=True)
-        self.fc = nn.Sequential(
-            nn.Linear(64 + (future_seq * 4), 128),
-            nn.ReLU(),
-            nn.Linear(128, 128),
-            nn.ReLU(),
-            nn.Linear(128, future_seq * 3)
-        )
-
-    def forward(self, x_past, w_target_future):
-        lstm_out, _ = self.lstm(x_past)
-        summary = lstm_out[:, -1, :]
-        w_flat = w_target_future.reshape(w_target_future.size(0), -1)
-        combined = torch.cat([summary, w_flat], dim=1)
-        out_flat = self.fc(combined)
-        return out_flat.reshape(out_flat.size(0), self.future_seq, 3)
+# TrajectoryNet は common/models.py に移動
 
 def main():
     # 学習データ（①②を結合）
@@ -166,7 +156,7 @@ def main():
 
     # 学習データでスケーラをフィット
     full_dataset = TrajectoryDataset(train_csv, past_seq=PAST_SEQ, future_seq=FUTURE_SEQ, is_train=True)
-    train_size = int(0.8 * len(full_dataset))
+    train_size = int(ncfg["train_ratio"] * len(full_dataset))
     val_size   = len(full_dataset) - train_size
     train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
 
@@ -182,7 +172,7 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
     best_val_loss = float('inf')
-    model_save_path = os.path.join(WEIGHTS_DIR, "best_trajectory_model.pth")
+    model_save_path = config.path("narx_model")
 
     print(f"\n=== エゴセントリック相対座標系モデル 学習開始 ===")
     for epoch in range(EPOCHS):

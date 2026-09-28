@@ -26,87 +26,42 @@ import torch.nn as nn
 import joblib
 import cv2
 
-sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                              '..', 'step1_cameracalibration'))
-sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                              '..', 'step2_datasampling'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
-from stereo_triangulate import StereoTracker, KalmanFilter3D
-from motor_control import MotorController
+import config
+from common.stereo_triangulate import StereoTracker, KalmanFilter3D
+from common.motor_control import MotorController
+from common.models import ControllerMLP
 
-# ========================================================
-# パス設定
-# ========================================================
-WEIGHTS_DIR  = "Data/Weights"
-TEST_CSV_DIR = "Data/rnn_csv/test"
-CTRL_A_PATH  = os.path.join(WEIGHTS_DIR, "best_controller_narx.pth")
-CTRL_B_PATH  = os.path.join(WEIGHTS_DIR, "best_controller_direct.pth")
-RESULT_DIR   = "Data/control_results"
-VIDEO_DIR = "Data/control_results/video"
+cfg  = config.load()
+mcfg = cfg["model"]
+rcfg = cfg["realtime"]
 
 # ========================================================
-# ハイパーパラメータ（train_rnn.py・train_controller.pyと統一）
+# パス設定（config.toml [paths]）
 # ========================================================
-PAST_SEQ   = 40
-FUTURE_SEQ = 20
-W_MIN, W_MAX = 0.0, 16.0
+TEST_CSV_DIR = config.path("test_csv_dir")
+CTRL_A_PATH  = config.path("ctrl_narx")
+CTRL_B_PATH  = config.path("ctrl_direct")
+RESULT_DIR   = config.path("control_results")
+VIDEO_DIR    = config.path("control_video")
 
-# 制御設定
-SAMPLING_RATE     = 20.0
+# ========================================================
+# ハイパーパラメータ（config.toml [model]、学習時と共通）
+# ========================================================
+PAST_SEQ   = mcfg["past_seq"]
+FUTURE_SEQ = mcfg["future_seq"]
+W_MIN, W_MAX = mcfg["w_min"], mcfg["w_max"]
+
+# 制御設定（config.toml [system] [realtime]）
+SAMPLING_RATE     = cfg["system"]["sampling_rate"]
 INTERVAL          = 1.0 / SAMPLING_RATE
-HOLD_STEPS        = 40        # 目標位置に向けて制御するステップ数
-N_TRIALS          = 20        # ランダムテストの試行回数
-CUT_INITIAL_STEPS = 100
-MOVEMENT_LIMIT    = 120.0
-POSITION_THRESH   = 10.0   # 到達判定の閾値 [mm]
-STABLE_STEPS      = 5      # 閾値以下をこの回数連続で確認したら終了
+HOLD_STEPS        = rcfg["hold_steps"]       # 目標位置に向けて制御するステップ数
+N_TRIALS          = rcfg["n_trials"]         # ランダムテストの試行回数
+CUT_INITIAL_STEPS = mcfg["cut_initial_steps"]
+POSITION_THRESH   = rcfg["position_thresh"]  # 到達判定の閾値 [mm]
 
-# ========================================================
-# モデル定義（train_rnn.py・train_controller.pyと同一）
-# ========================================================
-class TrajectoryNet(nn.Module):
-    def __init__(self, past_seq=40, future_seq=20):
-        super().__init__()
-        self.future_seq = future_seq
-        self.lstm = nn.LSTM(input_size=7, hidden_size=64,
-                            num_layers=2, batch_first=True)
-        self.fc = nn.Sequential(
-            nn.Linear(64 + future_seq * 4, 128), nn.ReLU(),
-            nn.Linear(128, 128),                  nn.ReLU(),
-            nn.Linear(128, future_seq * 3)
-        )
-
-    def forward(self, x_past, w_future):
-        out, _ = self.lstm(x_past)
-        summary = out[:, -1, :]
-        w_flat  = w_future.reshape(w_future.size(0), -1)
-        out     = self.fc(torch.cat([summary, w_flat], dim=1))
-        return out.reshape(out.size(0), self.future_seq, 3)
-
-
-class ControllerMLP(nn.Module):
-    def __init__(self, past_seq=40, future_seq=20,
-                 hidden_size=256, num_layers=3, dropout=0.1):
-        super().__init__()
-        self.future_seq = future_seq
-        in_dim  = 3 + 3 + past_seq * 4 + past_seq * 4
-        out_dim = future_seq * 4
-
-        layers, d = [], in_dim
-        for _ in range(num_layers):
-            layers += [nn.Linear(d, hidden_size),
-                       nn.LayerNorm(hidden_size),
-                       nn.ReLU(),
-                       nn.Dropout(dropout)]
-            d = hidden_size
-        layers += [nn.Linear(d, out_dim), nn.Sigmoid()]
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, cur, tgt, pw, pa):
-        x = torch.cat([cur, tgt,
-                        pw.reshape(pw.size(0), -1),
-                        pa.reshape(pa.size(0), -1)], dim=1)
-        return self.net(x).reshape(x.size(0), self.future_seq, 4)
+# ControllerMLP は common/models.py に移動
 
 
 # ========================================================
@@ -266,9 +221,9 @@ class ResultLogger:
 # ========================================================
 # テストCSVから目標位置をサンプリング
 # ========================================================
-def sample_target_positions(n, seed=42,
-                             y_abs_max=15.0,
-                             z_min=295.0, z_max=340.0):
+def sample_target_positions(n, seed=rcfg["target_seed"],
+                             y_abs_max=rcfg["target_y_abs_max"],
+                             z_min=rcfg["target_z_min"], z_max=rcfg["target_z_max"]):
     csv_files = glob.glob(os.path.join(TEST_CSV_DIR, "*.csv"))
     if not csv_files:
         raise FileNotFoundError(f"テストデータが見つかりません: {TEST_CSV_DIR}")
@@ -320,7 +275,6 @@ def run_random_test(controller, motor, kf, state_buf,
 
         
         errors_all = []
-        stable_count = 0
         next_time = time.perf_counter() + INTERVAL
 
         for step in range(HOLD_STEPS):
@@ -362,7 +316,7 @@ def run_random_test(controller, motor, kf, state_buf,
 
             print(f"\r  step={step:3d}  "
                   f"({pos_f[0]:6.1f},{pos_f[1]:6.1f},{pos_f[2]:6.1f})  "
-                  f"err={err:.1f}mm  stable={stable_count}/{STABLE_STEPS}  "
+                  f"err={err:.1f}mm  "
                   f"w=[{motor.target_pull_mm[0]:.1f},{motor.target_pull_mm[1]:.1f},"
                   f"{motor.target_pull_mm[2]:.1f},{motor.target_pull_mm[3]:.1f}]",
                   end="", flush=True)
@@ -385,9 +339,9 @@ def run_random_test(controller, motor, kf, state_buf,
 
         motor.set_targets([0.0] * 4)
         print(f"  自然長へ復帰中...")
-        for _ in range(10):
+        for _ in range(rcfg["return_steps"]):
             motor.communicate()
-            time.sleep(0.5)
+            time.sleep(rcfg["return_wait_sec"])
         print(f"  復帰完了")
 
     finals = [r[0] for r in results if not np.isnan(r[0])]
@@ -499,9 +453,9 @@ def main():
     mode = input("選択 (1/2) > ").strip()
 
     # --- スケーラ・モデル読み込み ---
-    target_scaler    = joblib.load(os.path.join(WEIGHTS_DIR, "target_scaler.pkl"))
-    angle_scaler     = joblib.load(os.path.join(WEIGHTS_DIR, "angle_scaler.pkl"))
-    rel_coord_scaler = joblib.load(os.path.join(WEIGHTS_DIR, "rel_coord_scaler.pkl"))
+    target_scaler    = joblib.load(config.path("target_scaler"))
+    angle_scaler     = joblib.load(config.path("angle_scaler"))
+    rel_coord_scaler = joblib.load(config.path("rel_coord_scaler"))
 
     controller = ControllerMLP(PAST_SEQ, FUTURE_SEQ).to(device)
     controller.load_state_dict(torch.load(ctrl_path, map_location=device,
@@ -511,23 +465,26 @@ def main():
 
     # --- ハードウェア初期化 ---
     print("\nモータ接続中...")
-    motor = MotorController(port="COM3", baudrate=115200)
+    motor = MotorController()
     if not motor.connect():
         raise RuntimeError("モータ接続失敗")
 
     print("カメラ初期化中...")
-    tracker = StereoTracker(cam_top_idx=1, cam_under_idx=0)
-    kf      = KalmanFilter3D(process_noise=1e-4, measurement_noise=0.05)
+    tracker = StereoTracker()
+    kcfg    = cfg["kalman"]
+    kf      = KalmanFilter3D(process_noise=kcfg["process_noise_realtime"],
+                             measurement_noise=kcfg["measurement_noise"])
 
-    print("ホワイトバランス安定待ち（10秒）...")
-    time.sleep(10.0)
+    print(f"ホワイトバランス安定待ち（{rcfg['camera_warmup_sec']}秒）...")
+    time.sleep(rcfg["camera_warmup_sec"])
     
     # 動画保存の準備
     os.makedirs(VIDEO_DIR, exist_ok=True)
     ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     video_path = os.path.join(VIDEO_DIR, f"{method_name}_{ts}.mp4")
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    video_writer = cv2.VideoWriter(video_path, fourcc, SAMPLING_RATE, (1280, 720))
+    video_writer = cv2.VideoWriter(video_path, fourcc, SAMPLING_RATE,
+                                   (cfg["camera"]["width"], cfg["camera"]["height"]))
     print(f"動画保存先: {video_path}")
 
     # カメラスレッド起動
@@ -547,12 +504,22 @@ def main():
     # バッファウォームアップ（PAST_SEQ分の初期状態を蓄積）
     print(f"バッファウォームアップ中（{PAST_SEQ}ステップ）...")
     wm_next = time.perf_counter() + INTERVAL
-    for _ in range(PAST_SEQ):
+    pushed, last_pos_f = 0, None
+    while pushed < PAST_SEQ:
         with data_lock:
             pos = shared["pos"]
         if pos is None:
-            pos = np.zeros(3)
-        pos_f = np.array(kf.update(pos))
+            if last_pos_f is None:
+                # マーカ初検出まで待つ（0 をフィルタに入れると初期値が狂うため）
+                print("\r  マーカ検出待ち...", end="", flush=True)
+                time.sleep(INTERVAL)
+                wm_next = time.perf_counter() + INTERVAL
+                continue
+            pos_f = last_pos_f            # 見失い中は直前の値を保持
+        else:
+            pos_f = np.array(kf.update(pos))
+        last_pos_f = pos_f
+        pushed += 1
         motor.communicate()
         state_buf.push(pos_f, motor.read_angles.copy(),
                        motor.target_pull_mm.copy())

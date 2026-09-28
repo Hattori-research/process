@@ -1,10 +1,18 @@
 import cv2
 import numpy as np
 import glob
+import os
+import sys
+import datetime
 
-# チェスボードの設定
-pattern_size = (10, 7)
-square_size = 12.00  # mm
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+import config
+
+cfg = config.load()
+
+# チェスボードの設定（config.toml [chessboard]）
+pattern_size = (cfg["chessboard"]["cols"], cfg["chessboard"]["rows"])
+square_size = cfg["chessboard"]["square_size"]  # mm
 
 # 3D空間のコーナー座標を準備 (0,0,0), (23.2,0,0), (46.4,0,0) ...
 objp = np.zeros((pattern_size[0] * pattern_size[1], 3), np.float32)
@@ -17,8 +25,9 @@ imgpoints_l = [] # 左カメラの画像平面上の2Dポイント
 imgpoints_r = [] # 右カメラの画像平面上の2Dポイント
 
 # 撮影した画像のパス（保存先に合わせて調整してください）
-images_left = sorted(glob.glob('calibration_images/left_*.jpg'))
-images_right = sorted(glob.glob('calibration_images/right_*.jpg'))
+calib_dir = config.path("calib_images")
+images_left = sorted(glob.glob(os.path.join(calib_dir, 'left_*.jpg')))
+images_right = sorted(glob.glob(os.path.join(calib_dir, 'right_*.jpg')))
 
 print(f"見つかった画像ペア: {len(images_left)}セット")
 
@@ -97,7 +106,7 @@ if len(objpoints) > 0:
         img_shape, R, T,
         flags=cv2.CALIB_ZERO_DISPARITY,
         alpha=0,
-        newImageSize=(1280, 720))
+        newImageSize=(cfg["camera"]["width"], cfg["camera"]["height"]))
 
     # キャリブレーション結果としてTベクトルを表示（垂直配置の確認用）
     print(f"並進ベクトルT (mm): {T.flatten()}")
@@ -105,13 +114,21 @@ if len(objpoints) > 0:
     print(f"  ※上下配置の場合 Ty≈-31mm, Tx≈0, Tz≈0 になれば正常")
 
     # 4. 後続のトラッキングで使用するためにパラメータを保存
-    np.savez("stereo_params.npz",
+    params_path = config.path("stereo_params")
+    np.savez(params_path,
              cameraMatrix1=cameraMatrix1, distCoeffs1=distCoeffs1,
              cameraMatrix2=cameraMatrix2, distCoeffs2=distCoeffs2,
              R=R, T=T, E=E, F=F,
              R1=R1, R2=R2, P1=P1, P2=P2, Q=Q,
              roi_left=roi_left, roi_right=roi_right)
-             
-    print("すべてのパラメータを 'stereo_params.npz' に保存しました．")
+
+    print(f"すべてのパラメータを '{params_path}' に保存しました．")
+
+    # 5. 校正結果の要約を config.toml [calibration] に記録
+    config.update("calibration", {
+        "stereo_rms":    round(float(ret_stereo), 4),
+        "baseline_calc": round(float(np.linalg.norm(T)), 3),
+        "calibrated_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    })
 else:
     print("有効な画像ペアがありませんでした．撮影データを確認してください．")

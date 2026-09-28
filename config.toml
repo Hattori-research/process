@@ -1,0 +1,134 @@
+# ==========================================================
+# 実測値・ハードコード値の一括管理ファイル
+#   - 手で編集してよい（"key = 値"  # コメント の形式を崩さない）
+#   - 一部の値はスクリプトが自動で書き換える（[auto] の付いた項目）
+#   - 読み込みは config.py の load() / 書き換えは update() を使う
+# ==========================================================
+
+[paths]  # process/ からの相対パス
+stereo_params = "step1_cameracalibration/stereo_params.npz"
+calib_images  = "step1_cameracalibration/calibration_images"
+mp4_dir       = "Data/mp4"
+png_dir       = "Data/png"
+rnn_csv_dir   = "Data/rnn_csv"
+train_csv_dir = "Data/rnn_csv/train"
+test_csv_dir  = "Data/rnn_csv/test"
+weights_dir   = "Data/Weights"
+narx_model       = "Data/Weights/best_trajectory_model.pth"
+ctrl_narx        = "Data/Weights/best_controller_narx.pth"     # 手法A
+ctrl_direct      = "Data/Weights/best_controller_direct.pth"   # 手法B
+target_scaler    = "Data/Weights/target_scaler.pkl"
+angle_scaler     = "Data/Weights/angle_scaler.pkl"
+rel_coord_scaler = "Data/Weights/rel_coord_scaler.pkl"
+control_results  = "Data/control_results"
+control_video    = "Data/control_results/video"
+
+[system]
+sampling_rate = 20.0  # [Hz]
+
+[camera]
+top_idx   = 1     # 上カメラ（stereo の left）
+under_idx = 0     # 下カメラ（stereo の right）
+width     = 1280
+height    = 720
+
+[marker]  # マーカ（緑）検出
+hsv_lower        = [83, 12, 121]    # [auto] HSV_tuner.py で ESC 確定時に書き換え
+hsv_upper        = [104, 255, 255]  # [auto] HSV_tuner.py で ESC 確定時に書き換え
+morph_kernel     = 5                # オープニング処理のカーネルサイズ [px]
+min_contour_area = 30               # これ未満の輪郭は無視 [px^2]
+
+[chessboard]  # キャリブレーション用チェスボード
+cols        = 10    # 内側交点数（列）
+rows        = 7     # 内側交点数（行）
+square_size = 12.0  # [mm]
+
+[calibration]  # stereo_calibrate.py の実行結果
+stereo_rms    = -1.0  # [auto] ステレオキャリブレーション RMS誤差 [px]（-1 = 未記録）
+baseline_calc = -1.0  # [auto] 校正で求まった基線長 |T| [mm]（-1 = 未記録）
+calibrated_at = ""    # [auto] 実行日時
+
+[triangulation]  # 3次元座標計算（実測値）
+cam_offset        = [-280.8, 84.4, -62.7]  # 左カメラの絶対座標 [mm]（X=奥行正, Y=水平左正, Z=鉛直下正）
+hand_eye_cal      = [0.0, 0.0, 0.0]        # cam_offset への追加補正 [mm]
+actual_baseline   = 31.73                  # 実測の基線長 [mm]（scale_factor = actual / |T|）
+natural_disp_norm = 0.1808                 # 自然状態での正規化視差（実測）
+natural_depth     = 277.0                  # 自然状態でのマーカ奥行き [mm]（定規で実測。カメラ由来の値は信用できないため）B_eff = natural_disp_norm * natural_depth
+min_disp_norm     = 0.1                    # これより視差が小さい場合は計測失敗扱い
+ema_alpha         = 0.3                    # 指数移動平均の係数
+
+[kalman]
+measurement_noise      = 0.05
+process_noise_sampling = 1e-5  # step2 データ取得時
+process_noise_realtime = 1e-4  # step5 実機制御時・動作確認時
+
+[motor]
+port            = "COM3"
+baudrate        = 115200
+timeout         = 1.0    # [s]
+pulley_diameter = 16.0   # [mm] 引張量[mm] → 角度[deg] 変換に使用
+min_pull        = 0.0    # 安全リミッタ下限 [mm]
+max_pull        = 60.0   # 安全リミッタ上限 [mm]
+max_current     = 0.1    # 通常時の電流指令
+return_current  = 0.1    # disconnect 時に初期位置へ戻すときの電流指令
+
+[sampling]  # step2 データ取得
+command_interval  = 2.0     # 引張指令の更新間隔 [s]
+target_samples    = 72000   # 目標サンプル数（20Hz × 60s × 60min）
+pull_min          = 0.0     # 1回の追加引張量の下限 [mm]
+pull_max          = 16.0    # 1回の追加引張量の上限 [mm]
+pull_total_max    = 30.0    # 累積引張量の上限 [mm]（超えたら全ワイヤを0に戻す）
+save_mode         = "mp4"   # "mp4" または "png"
+save_interval_sec = 600     # 動画ローテーション / スナップショット間隔 [s]
+camera_warmup_sec = 10.0    # カメラ初期化後の待ち時間 [s]
+
+# ----------------------------------------------------------
+# 学習（step3〜5 共通）※ 構造に関わる値を変えたら再学習が必要
+# ----------------------------------------------------------
+[model]
+past_seq          = 40      # 過去ステップ数（2秒）
+future_seq        = 20      # 未来ステップ数（1秒）
+w_min             = 0.0     # コントローラ出力の引張量範囲 [mm]
+w_max             = 16.0
+cut_initial_steps = 100     # 各CSVの先頭で捨てるステップ数
+movement_limit    = 120.0   # 初期位置からの座標クリップ幅 [mm]
+jump_thresh       = 150.0   # ウィンドウ内1ステップ変化量がこれを超えたらサンプル除外 [mm]
+
+[narx]  # step3 順モデル（構造）
+lstm_hidden   = 64
+lstm_layers   = 2
+fc_hidden     = 128
+# 学習
+batch_size    = 64
+epochs        = 200
+patience      = 20       # early stopping
+learning_rate = 1e-3
+train_ratio   = 0.8      # train / val 分割
+
+[controller]  # step4 MLPコントローラ（構造）
+hidden_size   = 256
+num_layers    = 3
+dropout       = 0.1
+# 学習
+batch_size    = 256
+epochs        = 200
+patience      = 20       # early stopping
+learning_rate = 1e-3
+weight_decay  = 1e-5
+grad_clip     = 1.0
+lr_factor     = 0.5      # ReduceLROnPlateau
+lr_patience   = 5        # ReduceLROnPlateau
+train_ratio   = 0.8      # train / val 分割
+split_seed    = 42
+
+[realtime]  # step5 実機制御
+hold_steps        = 40      # 1目標あたりの制御ステップ数（2秒）
+n_trials          = 20      # ランダム点追従テストの試行回数
+position_thresh   = 10.0    # 到達判定の閾値 [mm]（動画上の誤差表示の色分けに使用）
+target_seed       = 42      # 目標点サンプリングの乱数シード
+target_y_abs_max  = 15.0    # 目標点の候補範囲 |Y| [mm]
+target_z_min      = 295.0   # 目標点の候補範囲 Z下限 [mm]
+target_z_max      = 340.0   # 目標点の候補範囲 Z上限 [mm]
+camera_warmup_sec = 10.0    # ホワイトバランス安定待ち [s]
+return_steps      = 10      # 試行後に自然長へ戻す通信回数
+return_wait_sec   = 0.5     # 上記1回あたりの待ち時間 [s]

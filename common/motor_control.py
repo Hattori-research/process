@@ -1,17 +1,25 @@
+import os
+import sys
 import serial
 import time
 import numpy as np
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+import config
+
 class MotorController:
-    def __init__(self, port="COM3", baudrate=115200, timeout=1):
-        self.port = port
-        self.baudrate = baudrate
-        self.timeout = timeout
+    def __init__(self, port=None, baudrate=None, timeout=None):
+        mcfg = config.load()["motor"]
+        self.port = port if port is not None else mcfg["port"]
+        self.baudrate = baudrate if baudrate is not None else mcfg["baudrate"]
+        self.timeout = timeout if timeout is not None else mcfg["timeout"]
         self.ser = None
-        
+
         self.num_motors = 4
-        self.diameter = 16.0
+        self.diameter = mcfg["pulley_diameter"]
         self.digit = 360.0
+        self.max_current = mcfg["max_current"]
+        self.return_current = mcfg["return_current"]
         
         # モータの初期位置（絶対角度）を保持
         self.initial_angles = None
@@ -25,8 +33,8 @@ class MotorController:
         self.read_currents = np.zeros(self.num_motors)
         self.read_targets = np.zeros(self.num_motors)
 
-        self.MAX_PULL = 60.0
-        self.MIN_PULL = 0.0
+        self.MAX_PULL = mcfg["max_pull"]
+        self.MIN_PULL = mcfg["min_pull"]
 
     def connect(self):
         """シリアルポートを開き、現在の初期角度を取得する"""
@@ -57,10 +65,12 @@ class MotorController:
             print(f"\n[Error] Serial connection failed: {e}")
             return False
 
-    def set_targets(self, pull_mm_list, max_current=0.1):
+    def set_targets(self, pull_mm_list, max_current=None):
         """引張量[mm]を受け取り、初期位置からの相対的な絶対角度[deg]に変換してセットする"""
         if self.initial_angles is None:
             return
+        if max_current is None:
+            max_current = self.max_current
 
         for i in range(self.num_motors):
             # 安全リミッタ
@@ -81,7 +91,8 @@ class MotorController:
                 print("モータを初期位置（自然長）へ戻します...")
                 # 目標を初期位置（プラス方向）にして送信
                 pos_str = ",".join(map(str, self.initial_angles))
-                stop_msg = f"0.1,0.1,0.1,0.1,{pos_str}e\n"
+                cur_str = ",".join([str(self.return_current)] * self.num_motors)
+                stop_msg = f"{cur_str},{pos_str}e\n"
                 self.ser.write(stop_msg.encode())
                 self.ser.flush()
                 time.sleep(2.0) # 巻き戻り待ち

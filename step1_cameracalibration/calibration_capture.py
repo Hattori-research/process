@@ -1,25 +1,31 @@
 
 import os
+import sys
 os.environ["OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS"] = "0"
 import cv2
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+import config
+
+cfg = config.load()
+
 print("start")
 # 保存先ディレクトリの設定
-save_dir = "calibration_images"
+save_dir = config.path("calib_images")
 # os.makedirs(save_dir, exist_ok=True)
 
-# カメラの初期化（環境に合わせて0, 1, 2などのインデックスを変更してください）
-cap_top = cv2.VideoCapture(1)
-cap_under = cv2.VideoCapture(0)
+# カメラの初期化（インデックスは config.toml [camera]）
+cap_top = cv2.VideoCapture(cfg["camera"]["top_idx"])
+cap_under = cv2.VideoCapture(cfg["camera"]["under_idx"])
 
-# 解像度の設定（必要に応じてカメラの仕様に合わせて変更してください）
-cap_top.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-cap_top.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-cap_under.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-cap_under.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+# 解像度の設定（config.toml [camera]）
+cap_top.set(cv2.CAP_PROP_FRAME_WIDTH, cfg["camera"]["width"])
+cap_top.set(cv2.CAP_PROP_FRAME_HEIGHT, cfg["camera"]["height"])
+cap_under.set(cv2.CAP_PROP_FRAME_WIDTH, cfg["camera"]["width"])
+cap_under.set(cv2.CAP_PROP_FRAME_HEIGHT, cfg["camera"]["height"])
 
-# チェスボードの内側の交点数 (列, 行)
-pattern_size = (10, 7)
+# チェスボードの内側の交点数 (列, 行)（config.toml [chessboard]）
+pattern_size = (cfg["chessboard"]["cols"], cfg["chessboard"]["rows"])
 
 count = 0
 print("操作方法: [スペースキー] 撮影, [ESCキー] 終了")

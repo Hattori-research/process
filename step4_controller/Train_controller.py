@@ -22,92 +22,40 @@ import torch.nn as nn
 import joblib
 from torch.utils.data import Dataset, DataLoader
 
-# ========================================================
-# パス設定
-# ========================================================
-TRAIN_CSV_DIR   = "Data/rnn_csv/train"
-TEST_CSV_DIR    = "Data/rnn_csv/test"
-WEIGHTS_DIR     = "Data/Weights"
-NARX_MODEL_PATH = os.path.join(WEIGHTS_DIR, "best_trajectory_model.pth")
-CTRL_A_PATH     = os.path.join(WEIGHTS_DIR, "best_controller_narx.pth")
-CTRL_B_PATH     = os.path.join(WEIGHTS_DIR, "best_controller_direct.pth")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+import config
+from common.models import TrajectoryNet, ControllerMLP   # NARX（重み固定）とMLPコントローラ
+
+cfg  = config.load()
+mcfg = cfg["model"]
+ccfg = cfg["controller"]
 
 # ========================================================
-# ハイパーパラメータ
+# パス設定（config.toml [paths]）
 # ========================================================
-PAST_SEQ   = 40
-FUTURE_SEQ = 20
-BATCH_SIZE = 256
-EPOCHS     = 200
-LR         = 1e-3
-WEIGHT_DECAY = 1e-5
-PATIENCE   = 20
-GRAD_CLIP  = 1.0
-W_MIN, W_MAX = 0.0, 16.0
-
-CUT_INITIAL_STEPS = 100
-MOVEMENT_LIMIT    = 120.0
-JUMP_THRESH       = 150.0
-
+TRAIN_CSV_DIR   = config.path("train_csv_dir")
+TEST_CSV_DIR    = config.path("test_csv_dir")
+WEIGHTS_DIR     = config.path("weights_dir")
+NARX_MODEL_PATH = config.path("narx_model")
+CTRL_A_PATH     = config.path("ctrl_narx")
+CTRL_B_PATH     = config.path("ctrl_direct")
 
 # ========================================================
-# NARXモデル（train_rnn.pyと同一定義・重みは固定）
+# ハイパーパラメータ（config.toml [model] [controller]）
 # ========================================================
-class TrajectoryNet(nn.Module):
-    def __init__(self, past_seq=40, future_seq=20):
-        super().__init__()
-        self.future_seq = future_seq
-        self.lstm = nn.LSTM(input_size=7, hidden_size=64,
-                            num_layers=2, batch_first=True)
-        self.fc = nn.Sequential(
-            nn.Linear(64 + future_seq * 4, 128), nn.ReLU(),
-            nn.Linear(128, 128),                  nn.ReLU(),
-            nn.Linear(128, future_seq * 3)
-        )
+PAST_SEQ   = mcfg["past_seq"]
+FUTURE_SEQ = mcfg["future_seq"]
+BATCH_SIZE = ccfg["batch_size"]
+EPOCHS     = ccfg["epochs"]
+LR         = ccfg["learning_rate"]
+WEIGHT_DECAY = ccfg["weight_decay"]
+PATIENCE   = ccfg["patience"]
+GRAD_CLIP  = ccfg["grad_clip"]
+W_MIN, W_MAX = mcfg["w_min"], mcfg["w_max"]
 
-    def forward(self, x_past, w_future):
-        out, _ = self.lstm(x_past)
-        summary = out[:, -1, :]
-        w_flat  = w_future.reshape(w_future.size(0), -1)
-        out     = self.fc(torch.cat([summary, w_flat], dim=1))
-        return out.reshape(out.size(0), self.future_seq, 3)
-
-
-# ========================================================
-# MLPコントローラ（手法A・B共通アーキテクチャ）
-# ========================================================
-class ControllerMLP(nn.Module):
-    """
-    入力:
-      current_pos (3,)         現在位置（相対座標正規化済み）
-      target_pos  (3,)         目標位置（相対座標正規化済み）
-      past_w      (PAST_SEQ,4) 過去引張量（正規化済み）
-      past_angle  (PAST_SEQ,4) 過去エンコーダ（正規化済み）
-    出力:
-      w_out (FUTURE_SEQ, 4)  [0,1] → 後でW_MIN/W_MAXにスケール
-    """
-    def __init__(self, past_seq=40, future_seq=20,
-                 hidden_size=256, num_layers=3, dropout=0.1):
-        super().__init__()
-        self.future_seq = future_seq
-        in_dim  = 3 + 3 + past_seq * 4 + past_seq * 4
-        out_dim = future_seq * 4
-
-        layers, d = [], in_dim
-        for _ in range(num_layers):
-            layers += [nn.Linear(d, hidden_size),
-                       nn.LayerNorm(hidden_size),
-                       nn.ReLU(),
-                       nn.Dropout(dropout)]
-            d = hidden_size
-        layers += [nn.Linear(d, out_dim), nn.Sigmoid()]
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, cur, tgt, pw, pa):
-        x = torch.cat([cur, tgt,
-                        pw.reshape(pw.size(0), -1),
-                        pa.reshape(pa.size(0), -1)], dim=1)
-        return self.net(x).reshape(x.size(0), self.future_seq, 4)
+CUT_INITIAL_STEPS = mcfg["cut_initial_steps"]
+MOVEMENT_LIMIT    = mcfg["movement_limit"]
+JUMP_THRESH       = mcfg["jump_thresh"]
 
 
 # ========================================================
@@ -290,7 +238,7 @@ def run_training(method, ctrl, narx, train_loader, val_loader,
                  device, save_path, w_mean, w_std):
     opt = torch.optim.AdamW(ctrl.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     sch = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        opt, mode='min', factor=0.5, patience=5)
+        opt, mode='min', factor=ccfg["lr_factor"], patience=ccfg["lr_patience"])
 
     best_val, patience_cnt = float("inf"), 0
     print(f"\n=== [{method}] 学習開始 ===")
@@ -383,9 +331,9 @@ def main():
     os.makedirs(WEIGHTS_DIR, exist_ok=True)
 
     # スケーラ読み込み
-    target_scaler    = joblib.load(os.path.join(WEIGHTS_DIR, "target_scaler.pkl"))
-    angle_scaler     = joblib.load(os.path.join(WEIGHTS_DIR, "angle_scaler.pkl"))
-    rel_coord_scaler = joblib.load(os.path.join(WEIGHTS_DIR, "rel_coord_scaler.pkl"))
+    target_scaler    = joblib.load(config.path("target_scaler"))
+    angle_scaler     = joblib.load(config.path("angle_scaler"))
+    rel_coord_scaler = joblib.load(config.path("rel_coord_scaler"))
 
     # NARXモデル読み込み・全パラメータ固定
     narx = TrajectoryNet(PAST_SEQ, FUTURE_SEQ).to(device)
@@ -420,10 +368,10 @@ def main():
     ds_test  = ControllerDataset(test_csv,  PAST_SEQ, FUTURE_SEQ,
                                   target_scaler, angle_scaler, rel_coord_scaler)
 
-    n_tr = int(len(ds_train) * 0.8)
+    n_tr = int(len(ds_train) * ccfg["train_ratio"])
     n_vl = len(ds_train) - n_tr
     ds_tr, ds_vl = torch.utils.data.random_split(
-        ds_train, [n_tr, n_vl], generator=torch.Generator().manual_seed(42))
+        ds_train, [n_tr, n_vl], generator=torch.Generator().manual_seed(ccfg["split_seed"]))
 
     kw = dict(batch_size=BATCH_SIZE, num_workers=0)
     tr_loader   = DataLoader(ds_tr,   shuffle=True,  **kw)
