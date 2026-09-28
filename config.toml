@@ -98,7 +98,7 @@ camera_warmup_sec = 10.0    # カメラ初期化後の待ち時間 [s]
 
 [split]  # step2 split_train_test.py：1本の取得データを時間ブロックで train / test に分ける
 block_minutes = 5.0   # 1ブロックの長さ [min]（行数 = block_minutes × 60 × sampling_rate）
-test_every    = 5     # test_every ブロックごとに1つを test にする（5 → 約 8:2）
+test_every    = 4     # test_every ブロックごとに1つを test にする（4 → 約 3:1。5 だと 60分で約17%）
 test_index    = 2     # 各グループの何番目（0始まり）を test にするか
 min_block_ratio = 0.5 # 末尾の端数ブロックがこの割合未満なら直前のブロックに結合
 
