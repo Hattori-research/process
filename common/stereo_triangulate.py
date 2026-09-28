@@ -93,12 +93,28 @@ class StereoTracker:
             raise e
 
     def _init_cameras(self, idx_l, idx_r):
-        self.cap_top = cv2.VideoCapture(idx_l, cv2.CAP_DSHOW)
-        self.cap_under = cv2.VideoCapture(idx_r, cv2.CAP_DSHOW)
-        
-        for cap in (self.cap_top, self.cap_under):
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cam_cfg["width"])
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cam_cfg["height"])
+        # バックエンド・形式・FPS は config.toml [camera]。
+        # DSHOW + YUY2（非圧縮）+ FPS 未指定だと 1280x720 で約4fps しか出ない
+        self.cap_top = self._open_camera(idx_l)
+        self.cap_under = self._open_camera(idx_r)
+
+    def _open_camera(self, idx):
+        c = self.cam_cfg
+        props = [(cv2.CAP_PROP_FRAME_WIDTH, c["width"]),
+                 (cv2.CAP_PROP_FRAME_HEIGHT, c["height"]),
+                 (cv2.CAP_PROP_FPS, c["fps"])]
+        if c["fourcc"]:
+            props.insert(0, (cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*c["fourcc"])))
+        if c["backend"] == "DSHOW":
+            # DSHOW はオープン時にまとめて指定しないと形式（MJPG）が反映されない
+            return cv2.VideoCapture(idx, cv2.CAP_DSHOW, [v for p in props for v in p])
+        if c["backend"] == "MSMF":
+            # MSMF はオープン時の形式指定を受け付けないので、開いてから1項目ずつ設定する
+            cap = cv2.VideoCapture(idx, cv2.CAP_MSMF)
+            for prop, val in props:
+                cap.set(prop, val)
+            return cap
+        raise ValueError(f"[camera] backend が不正です: {c['backend']}")
 
 # 変更後（55〜67行目）
     def _transform_to_robot_coords(self, cam_x, cam_y, cam_z, method=None):

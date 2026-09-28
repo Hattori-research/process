@@ -32,6 +32,9 @@ top_idx   = 1     # 上カメラ（stereo の left）
 under_idx = 0     # 下カメラ（stereo の right）
 width     = 1280
 height    = 720
+backend   = "DSHOW"  # "DSHOW" または "MSMF"（2026-09-28 計測: DSHOW+YUY2 3.6fps / DSHOW+MJPG 15.9fps / MSMF+MJPG 24〜30fps だがオープン時に固まることがある）
+fourcc    = "MJPG"  # 取得形式（"" で既定の形式）
+fps       = 30
 
 [marker]  # マーカ（緑）検出
 hsv_lower        = [83, 12, 121]    # [auto] HSV_tuner.py で ESC 確定時に書き換え
@@ -55,7 +58,7 @@ calib_rot_top     = 3                      # 実行時フレーム → キャリ
 calib_rot_under   = 3                      # 同上（下カメラ）
 max_epipolar_px   = 3.0                    # calibrated: エピポーラ誤差がこれを超えた検出は捨てる [px]
 cam_offset        = [-280.8, 84.4, -62.7]  # legacy 用：左カメラの絶対座標 [mm]（X=奥行正, Y=水平左正, Z=鉛直下正）
-cam_offset_calibrated = [-285.2, 4.7, 15.8]  # [auto] calibrated 用。原点 = 自然状態のマーカ先端。check_triangulation.py の [o] で自然状態から再設定
+cam_offset_calibrated = [-290.24, 0.44, 16.61]  # [auto] calibrated 用。原点 = 自然状態のマーカ先端。check_triangulation.py の [o] で自然状態から再設定
 hand_eye_cal      = [0.0, 0.0, 0.0]        # cam_offset への追加補正 [mm]
 actual_baseline   = 31.73                  # 実測の基線長 [mm]（scale_factor = actual / |T|）
 natural_disp_norm = 0.1808                 # 自然状態での正規化視差（実測）※legacy のみ使用
