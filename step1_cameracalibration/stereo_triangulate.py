@@ -5,8 +5,8 @@ import cv2
 
 class StereoTracker:
     def __init__(self, cam_top_idx=1, cam_under_idx=0):
-        # 左カメラの絶対座標 (X=水平左が正, Y=奥行方向が正, Z=鉛直下が正) [mm]
-        CAM_OFFSET = np.array([-78.7,-277.0, 362.7])
+        # 左カメラの絶対座標 (X=奥行方向が正, Y=水平左が正, Z=鉛直下が正) [mm]
+        CAM_OFFSET = np.array([-280.8, 84.4, 62.7])
         self.FILTER_ALPHA = 0.3
         self.smoothed_pos = None
 
@@ -67,8 +67,8 @@ class StereoTracker:
         rect_z = cam_z * self.scale_factor
 
         # 軸の入れ替え
-        rob_x_base = rect_y   
-        rob_y_base = rect_z   
+        rob_x_base = rect_z
+        rob_y_base = -rect_y   
         rob_z_base = rect_x
         
         # カメラの位置オフセットを加算
@@ -99,8 +99,10 @@ class StereoTracker:
         return None
 
     def get_3d_coordinates_and_frames(self):
-        ret_l, frame_l = self.cap_top.read()
-        ret_r, frame_r = self.cap_under.read()
+        self.cap_top.grab()
+        self.cap_under.grab()
+        ret_l, frame_l = self.cap_top.retrieve()
+        ret_r, frame_r = self.cap_under.retrieve()
 
         # カメラそのものの読み取りに失敗した場合だけ全員 None を返す
         if not ret_l or not ret_r:
