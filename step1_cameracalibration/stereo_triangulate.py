@@ -6,7 +6,7 @@ import cv2
 class StereoTracker:
     def __init__(self, cam_top_idx=1, cam_under_idx=0):
         # 左カメラの絶対座標 (X=奥行方向が正, Y=水平左が正, Z=鉛直下が正) [mm]
-        CAM_OFFSET = np.array([-280.8, 84.4, 62.7])
+        CAM_OFFSET = np.array([-280.8, 84.4, -62.7])
         self.FILTER_ALPHA = 0.3
         self.smoothed_pos = None
 
@@ -32,7 +32,7 @@ class StereoTracker:
             self.T = params['T']
             self.R1 = params['R1'] 
             self.R2 = params['R2']
-            self.Q        = params['Q']
+            self.Q  = params['Q']
 
             # 基線長からスケール誤差を自動補正 (test_track.py と同一)
             # 変更後（28〜42行目）
@@ -69,7 +69,7 @@ class StereoTracker:
         # 軸の入れ替え
         rob_x_base = rect_z
         rob_y_base = -rect_y   
-        rob_z_base = rect_x
+        rob_z_base = -rect_x
         
         # カメラの位置オフセットを加算
         rob_x = rob_x_base + self.CAM_OFFSET[0]
