@@ -38,6 +38,17 @@ def create_video_writer(fps=20.0, width=1280, height=720):
 
 def main():
     global shared_data
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--samples", type=int, help="目標サンプル数（省略時は config.toml [sampling] target_samples）。短い試し取り用")
+    args = ap.parse_args()
+
+    # 安全停止用ファイル：実行中にこのファイルを作ると、ESC と同様に終了処理（自然長へ戻す）を行って止まる
+    stop_file = config.path("stop_file")
+    if os.path.exists(stop_file):
+        os.remove(stop_file)
+        print(f"前回の停止ファイルを削除しました: {stop_file}")
+    print(f"安全停止: {stop_file} を作成すると、自然長へ戻してから終了します")
 
     # 保存先ディレクトリの確保（サブディレクトリもすべて作成）
     os.makedirs(config.path("mp4_dir"), exist_ok=True)
@@ -53,7 +64,7 @@ def main():
     INTERVAL = 1.0 / SAMPLING_RATE
     COMMAND_INTERVAL = scfg["command_interval"]
 
-    TARGET_SAMPLES = scfg["target_samples"]
+    TARGET_SAMPLES = args.samples or scfg["target_samples"]
     collected_samples = 0
 
     #--引張量の設定
@@ -227,8 +238,8 @@ def main():
                     t0 = time.perf_counter()
                     key = cv2.waitKey(1) & 0xFF
                     timing["表示"] += time.perf_counter() - t0
-                    if key == 27:
-                        print("\n[ESC] ユーザーによって中断されました。")
+                    if key == 27 or os.path.exists(stop_file):
+                        print("\n[ESC / 停止ファイル] 中断します。")
                         TARGET_SAMPLES = collected_samples 
                         break
                     
