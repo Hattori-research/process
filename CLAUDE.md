@@ -105,6 +105,11 @@ process/stepN_<内容>/<スクリプト>.py の形でステップごとに分け
 - 位置は時刻 t-1 の現在位置を原点とする相対座標。エンコーダは各CSVの1行目基準
 - StandardScaler（target / angle / rel_coord）を `Data/Weights/*.pkl` に保存、モデルは `best_trajectory_model.pth`
 - 8:2 で train/val 分割、Adam, MSE, early stopping(20)。test で RMSE[mm] を表示
+  - 注意: val は重なり合うウィンドウのランダム分割なので train とほぼ同じ中身になり、val loss は楽観的（early stopping が効きにくい）。精度評価は時間ブロックで分けた test で行う
+- 学習結果（2026-09-29, 16Hz, train 44871 窓 / test 17174 窓, CPU で200エポック約25分, 早期終了せず val はまだ微減）:
+  - test 3D RMSE **2.38mm**（X 1.61 / Y 1.57 / Z 0.79）、1秒先（+16ステップ）の誤差 1.95mm
+  - 比較: 「動かない」予測 11.54mm、「等速で動く」予測 10.98mm → NARX は誤差を約 1/5 に削減（1秒間の実移動量は平均 9.5mm）
+  - ログ: `Data/Weights/train_rnn_log_20260929.txt`
 
 ## step4_controller（コントローラ学習） Train_controller.py
 - **仕様との差異**: ランダムシューティングによる逆データセット生成は未実装。代わりに以下2手法を比較
