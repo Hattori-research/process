@@ -51,6 +51,8 @@ LR         = ccfg["learning_rate"]
 WEIGHT_DECAY = ccfg["weight_decay"]
 PATIENCE   = ccfg["patience"]
 GRAD_CLIP  = ccfg["grad_clip"]
+LAMBDA_SMOOTH = ccfg["lambda_smooth"]   # 手法A: 引張量の変化の罰則
+LAMBDA_PRIOR  = ccfg["lambda_prior"]    # 手法A: 記録引張量からのずれの罰則
 W_MIN, W_MAX = mcfg["w_min"], mcfg["w_max"]
 
 CUT_INITIAL_STEPS = mcfg["cut_initial_steps"]
@@ -143,50 +145,60 @@ class ControllerDataset(Dataset):
 # ========================================================
 # 手法A: NARX間接学習
 # ========================================================
+def narx_loss(ctrl, narx, batch, device, w_mean, w_std):
+    """
+    手法Aの損失 = 位置誤差 + λ_smooth × 引張量の変化 + λ_prior × 記録引張量からのずれ
+      位置誤差 : NARX(コントローラ出力) の予測軌道と実データの未来軌道の MSE（正規化座標）
+      変化     : 直前の実引張量 → 出力16ステップの各ステップ間の差の2乗平均（[0,1] スケール）
+                 → 0/16mm を往復するような急峻な指令を抑える
+      ずれ     : 記録された未来引張量との MSE（[0,1] スケール）
+                 → NARX の学習範囲から大きく外れた入力を使って予測誤差だけを下げるのを抑える
+    返り値: (合計損失, 位置誤差, 変化, ずれ)
+    """
+    cur, tgt, pw, pa, x_narx, fut_pos, fut_w = (t.to(device) for t in batch)
+
+    # コントローラ出力 [0,1] → 物理スケール → NARXスケール
+    w_norm = ctrl(cur, tgt, pw, pa)                      # (B, F, 4) [0,1]
+    w_phys = w_norm * (W_MAX - W_MIN) + W_MIN            # [mm]
+    w_sc   = (w_phys - w_mean) / w_std                    # 勾配グラフ維持
+
+    # NARX予測（NARXパラメータへの勾配は不要だがグラフは維持）
+    pred = narx(x_narx, w_sc)                            # (B, F, 3)
+    # 全ステップの損失（最終ステップだけでなく全体を使う）
+    pos_loss = nn.functional.mse_loss(pred, fut_pos)
+
+    # 直前の実引張量（[0,1]）から出力の各ステップへの変化
+    to01 = lambda w_std_sc: ((w_std_sc * w_std + w_mean - W_MIN) / (W_MAX - W_MIN)).clamp(0.0, 1.0)
+    prev = to01(pw[:, -1:, :])                           # (B, 1, 4)
+    smooth = torch.diff(torch.cat([prev, w_norm], dim=1), dim=1).pow(2).mean()
+    prior  = nn.functional.mse_loss(w_norm, to01(fut_w))
+
+    loss = pos_loss + LAMBDA_SMOOTH * smooth + LAMBDA_PRIOR * prior
+    return loss, pos_loss, smooth, prior
+
+
 def train_narx_epoch(ctrl, narx, loader, opt, device, w_mean, w_std):
     ctrl.train()
     total = 0.0
-    for cur, tgt, pw, pa, x_narx, fut_pos, _ in loader:
-        cur, tgt   = cur.to(device),   tgt.to(device)
-        pw,  pa    = pw.to(device),    pa.to(device)
-        x_narx     = x_narx.to(device)
-        fut_pos    = fut_pos.to(device)
-
+    for batch in loader:
         opt.zero_grad()
-
-        # コントローラ出力 [0,1] → 物理スケール → NARXスケール
-        w_norm  = ctrl(cur, tgt, pw, pa)                     # (B, F, 4) [0,1]
-        w_phys  = w_norm * (W_MAX - W_MIN) + W_MIN           # [mm]
-        w_sc    = (w_phys - w_mean) / w_std                   # 勾配グラフ維持
-
-        # NARX予測（NARXパラメータへの勾配は不要だがグラフは維持）
-        pred = narx(x_narx, w_sc)                            # (B, F, 3)
-
-        # 全ステップの損失（最終ステップだけでなく全体を使う）
-        loss = nn.functional.mse_loss(pred, fut_pos)
+        loss, *_ = narx_loss(ctrl, narx, batch, device, w_mean, w_std)
         loss.backward()
         nn.utils.clip_grad_norm_(ctrl.parameters(), GRAD_CLIP)
         opt.step()
-        total += loss.item() * cur.size(0)
+        total += loss.item() * batch[0].size(0)
     return total / len(loader.dataset)
 
 
 @torch.no_grad()
-def eval_narx(ctrl, narx, loader, device, w_mean, w_std):
+def eval_narx(ctrl, narx, loader, device, w_mean, w_std, detail=False):
     ctrl.eval()
-    total = 0.0
-    for cur, tgt, pw, pa, x_narx, fut_pos, _ in loader:
-        cur, tgt = cur.to(device), tgt.to(device)
-        pw, pa   = pw.to(device),  pa.to(device)
-        x_narx   = x_narx.to(device)
-        fut_pos  = fut_pos.to(device)
-
-        w_norm = ctrl(cur, tgt, pw, pa)
-        w_phys = w_norm * (W_MAX - W_MIN) + W_MIN
-        w_sc   = (w_phys - w_mean) / w_std
-        pred   = narx(x_narx, w_sc)
-        total += nn.functional.mse_loss(pred, fut_pos).item() * cur.size(0)
-    return total / len(loader.dataset)
+    sums = np.zeros(4)
+    for batch in loader:
+        vals = narx_loss(ctrl, narx, batch, device, w_mean, w_std)
+        sums += np.array([v.item() for v in vals]) * batch[0].size(0)
+    means = sums / len(loader.dataset)
+    return means if detail else means[0]
 
 
 # ========================================================
@@ -254,9 +266,13 @@ def run_training(method, ctrl, narx, train_loader, val_loader,
         sch.step(vl)
 
         if epoch % 10 == 0 or epoch == 1:
+            detail = ""
+            if method == "NARX間接":
+                _, pos, smo, pri = eval_narx(ctrl, narx, val_loader, device, w_mean, w_std, detail=True)
+                detail = f"  (Val 位置:{pos:.6f} 変化:{smo:.5f} ずれ:{pri:.5f})"
             print(f"Epoch [{epoch:3d}/{EPOCHS}]  "
                   f"Train:{tr:.6f}  Val:{vl:.6f}  "
-                  f"LR:{opt.param_groups[0]['lr']:.2e}")
+                  f"LR:{opt.param_groups[0]['lr']:.2e}{detail}")
 
         if vl < best_val:
             best_val, patience_cnt = vl, 0
@@ -304,6 +320,7 @@ def test_evaluation(method, ctrl, narx, loader, device,
         wi = w_all[:, :, i]
         print(f"  W{i}: mean={wi.mean():.2f} std={wi.std():.2f} "
               f"min={wi.min():.2f} max={wi.max():.2f}")
+    print(f"  ステップ間の変化 |ΔW| 平均 {np.abs(np.diff(w_all, axis=1)).mean():.3f} mm")
 
     if method == "NARX間接" and pred_pos_list:
         preds = np.concatenate(pred_pos_list, axis=0)
@@ -326,6 +343,11 @@ def test_evaluation(method, ctrl, narx, loader, device,
 # メイン
 # ========================================================
 def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--only", choices=["A", "B"], help="片方の手法だけ学習する（省略時は両方）")
+    args = ap.parse_args()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
     os.makedirs(WEIGHTS_DIR, exist_ok=True)
@@ -379,28 +401,31 @@ def main():
     test_loader = DataLoader(ds_test, shuffle=False, **kw)
 
     print(f"Train:{len(ds_tr)}  Val:{len(ds_vl)}  Test:{len(ds_test)}")
+    print(f"手法A 正則化: lambda_smooth={LAMBDA_SMOOTH}  lambda_prior={LAMBDA_PRIOR}")
 
     # ==========================================
     # 手法A: NARX間接学習
     # ==========================================
-    ctrl_a = ControllerMLP(PAST_SEQ, FUTURE_SEQ).to(device)
-    run_training("NARX間接", ctrl_a, narx, tr_loader, vl_loader,
-                 device, CTRL_A_PATH, w_mean, w_std)
-    ctrl_a.load_state_dict(torch.load(CTRL_A_PATH, map_location=device,
-                                      weights_only=True))
-    test_evaluation("NARX間接", ctrl_a, narx, test_loader, device,
-                    rel_coord_scaler, w_mean, w_std)
+    if args.only != "B":
+        ctrl_a = ControllerMLP(PAST_SEQ, FUTURE_SEQ).to(device)
+        run_training("NARX間接", ctrl_a, narx, tr_loader, vl_loader,
+                     device, CTRL_A_PATH, w_mean, w_std)
+        ctrl_a.load_state_dict(torch.load(CTRL_A_PATH, map_location=device,
+                                          weights_only=True))
+        test_evaluation("NARX間接", ctrl_a, narx, test_loader, device,
+                        rel_coord_scaler, w_mean, w_std)
 
     # ==========================================
     # 手法B: 直接逆モデル学習
     # ==========================================
-    ctrl_b = ControllerMLP(PAST_SEQ, FUTURE_SEQ).to(device)
-    run_training("直接逆モデル", ctrl_b, narx, tr_loader, vl_loader,
-                 device, CTRL_B_PATH, w_mean, w_std)
-    ctrl_b.load_state_dict(torch.load(CTRL_B_PATH, map_location=device,
-                                      weights_only=True))
-    test_evaluation("直接逆モデル", ctrl_b, narx, test_loader, device,
-                    rel_coord_scaler, w_mean, w_std)
+    if args.only != "A":
+        ctrl_b = ControllerMLP(PAST_SEQ, FUTURE_SEQ).to(device)
+        run_training("直接逆モデル", ctrl_b, narx, tr_loader, vl_loader,
+                     device, CTRL_B_PATH, w_mean, w_std)
+        ctrl_b.load_state_dict(torch.load(CTRL_B_PATH, map_location=device,
+                                          weights_only=True))
+        test_evaluation("直接逆モデル", ctrl_b, narx, test_loader, device,
+                        rel_coord_scaler, w_mean, w_std)
 
     print("\n=== 全学習完了 ===")
     print(f"  手法A: {CTRL_A_PATH}")

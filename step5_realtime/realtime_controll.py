@@ -222,8 +222,7 @@ class ResultLogger:
 # テストCSVから目標位置をサンプリング
 # ========================================================
 def sample_target_positions(n, seed=rcfg["target_seed"],
-                             y_abs_max=rcfg["target_y_abs_max"],
-                             z_min=rcfg["target_z_min"], z_max=rcfg["target_z_max"]):
+                             percentile=rcfg["target_percentile"]):
     csv_files = glob.glob(os.path.join(TEST_CSV_DIR, "*.csv"))
     if not csv_files:
         raise FileNotFoundError(f"テストデータが見つかりません: {TEST_CSV_DIR}")
@@ -235,13 +234,11 @@ def sample_target_positions(n, seed=rcfg["target_seed"],
         frames.append(df[["X", "Y", "Z"]])
     all_pos = pd.concat(frames, ignore_index=True).values
 
-    # 信頼できる範囲でフィルタリング
-    mask = (
-        (np.abs(all_pos[:, 1]) <= y_abs_max) &   # |Y| <= 30mm
-        (all_pos[:, 2] >= z_min) &                # Z下限
-        (all_pos[:, 2] <= z_max)                  # Z上限
-    )
+    # 各軸が test データのパーセンタイル範囲に入る点だけを候補にする（外れ値・端の点を除く）
+    lo, hi = np.percentile(all_pos, percentile, axis=0)
+    mask = np.all((all_pos >= lo) & (all_pos <= hi), axis=1)
     filtered = all_pos[mask]
+    print(f"  候補範囲 X {lo[0]:.1f}〜{hi[0]:.1f}  Y {lo[1]:.1f}〜{hi[1]:.1f}  Z {lo[2]:.1f}〜{hi[2]:.1f} mm")
     print(f"  フィルタ後候補数: {len(filtered)} / {len(all_pos)}")
 
     if len(filtered) < n:
