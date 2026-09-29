@@ -62,6 +62,9 @@ CUT_INITIAL_STEPS = mcfg["cut_initial_steps"]
 POSITION_THRESH   = rcfg["position_thresh"]  # 到達判定の閾値 [mm]
 WARMUP_TIMEOUT    = rcfg["warmup_timeout_sec"]  # マーカ初検出待ちの上限 [s]
 STOP_FILE         = config.path("stop_file")    # このファイルを置くと安全に停止（自然長へ戻してから終了）
+RETURN_MIN_SEC    = rcfg["return_min_sec"]      # 試行後の自然長への復帰：最短時間 [s]
+RETURN_MAX_SEC    = rcfg["return_max_sec"]      # 同：最長時間 [s]
+RETURN_SETTLE_MM  = rcfg["return_settle_mm"]    # 同：直近1秒の移動がこれ未満なら落ち着いたとみなす [mm]
 
 
 class StopRequested(Exception):
@@ -362,11 +365,7 @@ def run_random_test(controller, motor, kf, state_buf,
         results.append((final_err, mean_err, min_err_val))
 
         motor.set_targets([0.0] * 4)
-        print(f"  自然長へ復帰中...")
-        for _ in range(rcfg["return_steps"]):
-            motor.communicate()
-            time.sleep(rcfg["return_wait_sec"])
-        print(f"  復帰完了")
+        return_to_natural(motor, kf, state_buf)
 
     finals = [r[0] for r in results if not np.isnan(r[0])]
     means  = [r[1] for r in results if not np.isnan(r[1])]
@@ -448,6 +447,42 @@ def run_manual_mode(controller, motor, kf, state_buf, device):
 
         print()
         motor.set_targets([0.0] * 4)
+
+
+def return_to_natural(motor, kf, state_buf):
+    """
+    試行の合間に自然長へ戻す。戻している間も制御と同じ周期でカルマンフィルタと状態バッファを更新し続け
+    （更新しないと次の試行の開始時にフィルタ・過去履歴が前の試行の位置のまま残る）、
+    位置が落ち着いたら（直近1秒の移動が RETURN_SETTLE_MM 未満）次へ進む。最短 RETURN_MIN_SEC・最長 RETURN_MAX_SEC
+    """
+    print(f"  自然長へ復帰中...", end="", flush=True)
+    window = max(2, int(round(SAMPLING_RATE)))        # 直近1秒分
+    hist = []
+    t_start = time.perf_counter()
+    next_time = t_start + INTERVAL
+    settled = False
+    while True:
+        check_stop()
+        with data_lock:
+            pos = shared["pos"]
+        motor.communicate()
+        if pos is not None:
+            pos_f = np.array(kf.update(pos))
+            state_buf.push(pos_f, motor.read_angles.copy(), motor.target_pull_mm.copy())
+            hist.append(pos_f)
+        elapsed = time.perf_counter() - t_start
+        if len(hist) >= window and elapsed >= RETURN_MIN_SEC:
+            if np.linalg.norm(hist[-1] - hist[-window]) < RETURN_SETTLE_MM:
+                settled = True
+                break
+        if elapsed >= RETURN_MAX_SEC:
+            break
+        now = time.perf_counter()
+        if next_time - now > 0:
+            time.sleep(next_time - now)
+        next_time += INTERVAL
+    last = hist[-1] if hist else np.full(3, np.nan)
+    print(f" {'完了' if settled else '時間切れ'}（{elapsed:.1f}s, 位置 ({last[0]:.1f}, {last[1]:.1f}, {last[2]:.1f})）")
 
 
 # ========================================================
