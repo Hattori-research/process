@@ -124,13 +124,19 @@ def main():
         
         fail_count = 0
         last_save_time = time.time()
+
+        # ループ処理時間の計測（sampling_rate を維持できているかの確認用）
+        timing = {"通信": 0.0, "動画": 0.0, "表示": 0.0, "合計": 0.0}
+        n_loops = n_late = 0
+        last_report = time.perf_counter()
         
         try:
             with open(csv_filename, mode='a', newline='') as f:
                 writer = csv.writer(f)
                 
                 while collected_samples < TARGET_SAMPLES:
-                    current_time = time.perf_counter() - start_time
+                    t_loop = time.perf_counter()
+                    current_time = t_loop - start_time
                     absolute_time = time.time()
                     
                     # --- 【指令更新】2秒ごとに相対引張量を計算 ---
@@ -149,7 +155,10 @@ def main():
                         last_command_time = current_time
 
                     # --- 【サンプリング】sampling_rate [Hz] で通信と記録 ---
-                    if motor.communicate():
+                    t0 = time.perf_counter()
+                    comm_ok = motor.communicate()
+                    timing["通信"] += time.perf_counter() - t0
+                    if comm_ok:
                         fail_count = 0 
                         with data_lock:
                             pos = shared_data["pos"]
@@ -185,7 +194,10 @@ def main():
                     # --- 映像表示と録画/画像保存処理 ---
                     if shared_data["frame_r"] is not None:
                         current_frame = shared_data["frame_r"]
+                        t0 = time.perf_counter()
                         cv2.imshow('Right Tracking (Preview)', current_frame)
+                        timing["表示"] += time.perf_counter() - t0
+                        t0 = time.perf_counter()
                         
                         if SAVE_MODE == "mp4":
                             if video_out is None:
@@ -210,13 +222,29 @@ def main():
                                 cv2.imwrite(img_filename, current_frame)
                                 print(f"\n[Image] 20分経過。スナップショットを保存しました: {img_filename}")
                                 last_save_time = absolute_time
+                        timing["動画"] += time.perf_counter() - t0
 
-                    if cv2.waitKey(1) & 0xFF == 27:
+                    t0 = time.perf_counter()
+                    key = cv2.waitKey(1) & 0xFF
+                    timing["表示"] += time.perf_counter() - t0
+                    if key == 27:
                         print("\n[ESC] ユーザーによって中断されました。")
                         TARGET_SAMPLES = collected_samples 
                         break
                     
+                    # 処理時間の集計（10秒ごとに表示）
                     now = time.perf_counter()
+                    timing["合計"] += now - t_loop
+                    n_loops += 1
+                    n_late += (now - t_loop) > INTERVAL
+                    if now - last_report >= 10.0:
+                        avg = {k: v / n_loops * 1000 for k, v in timing.items()}
+                        print(f"\n[Timing] 1周 平均 {avg['合計']:.1f}ms（通信 {avg['通信']:.1f} / 動画 {avg['動画']:.1f} / 表示 {avg['表示']:.1f}）"
+                              f" 目標 {INTERVAL * 1000:.0f}ms 超過 {n_late}/{n_loops} 回")
+                        timing = dict.fromkeys(timing, 0.0)
+                        n_loops = n_late = 0
+                        last_report = now
+
                     sleep_time = next_time - now
                     if sleep_time > 0:
                         time.sleep(sleep_time)

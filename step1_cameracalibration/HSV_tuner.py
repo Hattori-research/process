@@ -8,6 +8,7 @@ os.environ["OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS"] = "0"
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 import config
+from common.stereo_triangulate import open_camera
 
 def nothing(x):
     pass
@@ -17,9 +18,8 @@ cfg = config.load()
 mk  = cfg["marker"]
 lo, hi = mk["hsv_lower"], mk["hsv_upper"]   # 現在の設定値を初期値にする
 
-cap = cv2.VideoCapture(cfg["camera"]["top_idx"], cv2.CAP_DSHOW)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, cfg["camera"]["width"])
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cfg["camera"]["height"])
+# 計測時と同じ設定（形式・露出・ゲイン・ホワイトバランス）で開く
+cap = open_camera(cfg["camera"]["top_idx"], "top")
 
 cv2.namedWindow("HSV Tuner")
 cv2.createTrackbar("H_low",  "HSV Tuner", lo[0], 179, nothing)

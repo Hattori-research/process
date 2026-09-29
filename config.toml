@@ -24,9 +24,10 @@ rel_coord_scaler = "Data/Weights/rel_coord_scaler.pkl"
 control_results  = "Data/control_results"
 control_video    = "Data/control_results/video"
 triangulation_check = "Data/triangulation_check"   # check_triangulation.py の記録先
+stop_file        = "Data/STOP"   # step5 実行中にこのファイルを作ると、自然長へ戻してから安全に停止する
 
 [system]
-sampling_rate = 16.0  # [Hz]（2026-09-29 20→16Hz。カメラ取得が約16fps のため）
+sampling_rate = 20.0  # [Hz]（2026-09-29 露出固定でカメラ 30fps が出るようになったため 16→20Hz に戻した）
 
 [camera]
 top_idx   = 1     # 上カメラ（stereo の left）
@@ -36,6 +37,14 @@ height    = 720
 backend   = "DSHOW"  # "DSHOW" または "MSMF"（2026-09-28 計測: DSHOW+YUY2 3.6fps / DSHOW+MJPG 15.9fps / MSMF+MJPG 24〜30fps だがオープン時に固まることがある）
 fourcc    = "MJPG"  # 取得形式（"" で既定の形式）
 fps       = 30
+# 露出・ゲイン・ホワイトバランスの固定（2026-09-29。自動露出だと照明変化でマーカを見失い、露出時間が延びて約16fps に落ちていた）
+# 露出は 2^n 秒（-5 = 1/32秒）。-4（1/16秒）より長くすると 16Hz を維持できない。明るさはゲインで調整する
+fix_exposure   = true
+exposure_top   = -5
+exposure_under = -5
+gain_top       = 128     # 0〜255。2026-09-29 夕方の照明でマーカ V≈255（しきい値 121）、検出率 100%
+gain_under     = 128
+wb_temperature = 4000    # ホワイトバランス固定 [K]（マーカの色相 H≈88 を安定させる）
 
 [marker]  # マーカ（緑）検出
 hsv_lower        = [83, 12, 121]    # [auto] HSV_tuner.py で ESC 確定時に書き換え
@@ -57,9 +66,9 @@ calibrated_at = ""    # [auto] 実行日時
 method            = "calibrated"           # "calibrated"（R,T を使う三角測量）/ "legacy"（B_eff による旧方式。2026-09-28 以前のデータはこちら）
 calib_rot_top     = 3                      # 実行時フレーム → キャリブ時フレームの時計回り90°回転回数（上カメラ）。2026-09-28 エピポーラ誤差で判定
 calib_rot_under   = 3                      # 同上（下カメラ）
-max_epipolar_px   = 3.0                    # calibrated: エピポーラ誤差がこれを超えた検出は捨てる [px]
+max_epipolar_px   = 10.0                   # calibrated: エピポーラ誤差がこれを超えた検出は捨てる [px]
 cam_offset        = [-280.8, 84.4, -62.7]  # legacy 用：左カメラの絶対座標 [mm]（X=奥行正, Y=水平左正, Z=鉛直下正）
-cam_offset_calibrated = [-290.24, 0.44, 16.61]  # [auto] calibrated 用。原点 = 自然状態のマーカ先端。check_triangulation.py の [o] で自然状態から再設定
+cam_offset_calibrated = [-272.79, 2.9, 18.13]  # [auto] calibrated 用。原点 = 自然状態のマーカ先端。check_triangulation.py の [o] で自然状態から再設定
 hand_eye_cal      = [0.0, 0.0, 0.0]        # cam_offset への追加補正 [mm]
 actual_baseline   = 31.73                  # 実測の基線長 [mm]（scale_factor = actual / |T|）
 natural_disp_norm = 0.1808                 # 自然状態での正規化視差（実測）※legacy のみ使用
@@ -88,7 +97,7 @@ return_current  = 0.1    # disconnect 時に初期位置へ戻すときの電流
 
 [sampling]  # step2 データ取得
 command_interval  = 2.0     # 引張指令の更新間隔 [s]
-target_samples    = 57600   # 目標サンプル数（16Hz × 60s × 60min）
+target_samples    = 72000   # 目標サンプル数（20Hz × 60s × 60min）
 pull_min          = 0.0     # 1回の追加引張量の下限 [mm]
 pull_max          = 16.0    # 1回の追加引張量の上限 [mm]
 pull_total_max    = 30.0    # 累積引張量の上限 [mm]（超えたら全ワイヤを0に戻す）
@@ -108,11 +117,11 @@ max_gap_sec   = 0.5   # これより長い記録の途切れ（マーカ見失�
 # 学習（step3〜5 共通）※ 構造に関わる値を変えたら再学習が必要
 # ----------------------------------------------------------
 [model]
-past_seq          = 32      # 過去ステップ数（16Hz で 2秒）
-future_seq        = 16      # 未来ステップ数（16Hz で 1秒）
+past_seq          = 40      # 過去ステップ数（20Hz で 2秒）
+future_seq        = 20      # 未来ステップ数（20Hz で 1秒）
 w_min             = 0.0     # コントローラ出力の引張量範囲 [mm]
 w_max             = 16.0
-cut_initial_steps = 80      # 各CSVの先頭で捨てるステップ数（16Hz で 5秒）
+cut_initial_steps = 100     # 各CSVの先頭で捨てるステップ数（20Hz で 5秒）
 movement_limit    = 120.0   # 初期位置からの座標クリップ幅 [mm]
 jump_thresh       = 150.0   # ウィンドウ内1ステップ変化量がこれを超えたらサンプル除外 [mm]
 
@@ -146,7 +155,7 @@ train_ratio   = 0.8      # train / val 分割
 split_seed    = 42
 
 [realtime]  # step5 実機制御
-hold_steps        = 32      # 1目標あたりの制御ステップ数（16Hz で 2秒）
+hold_steps        = 40      # 1目標あたりの制御ステップ数（20Hz で 2秒）
 n_trials          = 20      # ランダム点追従テストの試行回数
 position_thresh   = 10.0    # 到達判定の閾値 [mm]（動画上の誤差表示の色分けに使用）
 target_seed       = 42      # 目標点サンプリングの乱数シード
@@ -154,3 +163,4 @@ target_percentile = [5.0, 95.0]  # test データの各軸の位置がこのパ�
 camera_warmup_sec = 10.0    # ホワイトバランス安定待ち [s]
 return_steps      = 10      # 試行後に自然長へ戻す通信回数
 return_wait_sec   = 0.5     # 上記1回あたりの待ち時間 [s]
+warmup_timeout_sec = 30.0   # 起動時のマーカ初検出待ちの上限 [s]（超えたら原因を表示して安全停止）

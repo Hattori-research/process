@@ -60,6 +60,25 @@ HOLD_STEPS        = rcfg["hold_steps"]       # 目標位置に向けて制御す
 N_TRIALS          = rcfg["n_trials"]         # ランダムテストの試行回数
 CUT_INITIAL_STEPS = mcfg["cut_initial_steps"]
 POSITION_THRESH   = rcfg["position_thresh"]  # 到達判定の閾値 [mm]
+WARMUP_TIMEOUT    = rcfg["warmup_timeout_sec"]  # マーカ初検出待ちの上限 [s]
+STOP_FILE         = config.path("stop_file")    # このファイルを置くと安全に停止（自然長へ戻してから終了）
+
+
+class StopRequested(Exception):
+    """停止ファイル・検出タイムアウトによる安全停止"""
+
+
+def check_stop():
+    if os.path.exists(STOP_FILE):
+        raise StopRequested(f"停止ファイルを検出: {STOP_FILE}")
+
+
+def marker_diag(tracker):
+    """直近フレームで、上下どちらのカメラでマーカが見えているか・エピポーラ誤差を文字列で返す"""
+    cl, cr = getattr(tracker, "last_centers", (None, None))
+    epi = tracker.last_epipolar_px
+    return (f"上カメラ:{'検出' if cl else '未検出'}  下カメラ:{'検出' if cr else '未検出'}  "
+            f"エピポーラ誤差:{'-' if epi is None else f'{epi:.1f}px'}（上限 {tracker.max_epipolar_px}px）")
 
 # ControllerMLP は common/models.py に移動
 
@@ -272,9 +291,12 @@ def run_random_test(controller, motor, kf, state_buf,
 
         
         errors_all = []
+        loop_times = []                     # 1周の処理時間（sampling_rate を維持できているかの確認用）
         next_time = time.perf_counter() + INTERVAL
 
         for step in range(HOLD_STEPS):
+            t_loop = time.perf_counter()
+            check_stop()
             with data_lock:
                 pos = shared["pos"]
 
@@ -320,9 +342,14 @@ def run_random_test(controller, motor, kf, state_buf,
 
 
             now = time.perf_counter()
+            loop_times.append(now - t_loop)
             if next_time - now > 0:
                 time.sleep(next_time - now)
             next_time += INTERVAL
+
+        if loop_times:
+            lt = np.array(loop_times) * 1000
+            print(f"\n  [Timing] 1周 平均 {lt.mean():.1f}ms 最大 {lt.max():.1f}ms（目標 {INTERVAL * 1000:.0f}ms 超過 {(lt > INTERVAL * 1000).sum()}/{len(lt)} 回）", end="")
 
         errors_back_half = [e for s, e in enumerate(errors_all) if s >= HOLD_STEPS // 2]
         final_err   = errors_all[-1] if errors_all else float("nan")
@@ -383,6 +410,7 @@ def run_manual_mode(controller, motor, kf, state_buf, device):
         next_time = time.perf_counter() + INTERVAL
 
         for step in range(HOLD_STEPS):
+            check_stop()
             with data_lock:
                 pos   = shared["pos"]
                 frame = shared["frame_top"]
@@ -425,7 +453,52 @@ def run_manual_mode(controller, motor, kf, state_buf, device):
 # ========================================================
 # メイン
 # ========================================================
+def warmup(motor, kf, state_buf, tracker):
+    """
+    バッファウォームアップ（PAST_SEQ分の初期状態を蓄積）
+    マーカを初めて検出するまで待つ（0 をフィルタに入れると初期値が狂うため）。
+    WARMUP_TIMEOUT 秒検出できなければ、どちらのカメラで見えていないかを表示して中断する
+    """
+    print(f"バッファウォームアップ中（{PAST_SEQ}ステップ）...")
+    t_start = time.perf_counter()
+    last_diag = 0.0
+    wm_next = time.perf_counter() + INTERVAL
+    pushed, last_pos_f = 0, None
+    while pushed < PAST_SEQ:
+        check_stop()
+        with data_lock:
+            pos = shared["pos"]
+        if pos is None:
+            if last_pos_f is None:
+                waited = time.perf_counter() - t_start
+                if waited - last_diag >= 1.0:
+                    last_diag = waited
+                    print(f"\r  マーカ検出待ち {waited:4.0f}s  {marker_diag(tracker)}      ", end="", flush=True)
+                if waited > WARMUP_TIMEOUT:
+                    raise StopRequested(f"{WARMUP_TIMEOUT:.0f}秒マーカを検出できませんでした（{marker_diag(tracker)}）")
+                time.sleep(INTERVAL)
+                wm_next = time.perf_counter() + INTERVAL
+                continue
+            pos_f = last_pos_f            # 見失い中は直前の値を保持
+        else:
+            pos_f = np.array(kf.update(pos))
+        last_pos_f = pos_f
+        pushed += 1
+        motor.communicate()
+        state_buf.push(pos_f, motor.read_angles.copy(),
+                       motor.target_pull_mm.copy())
+        now = time.perf_counter()
+        if wm_next - now > 0:
+            time.sleep(wm_next - now)
+        wm_next += INTERVAL
+    print("\nウォームアップ完了")
+
+
 def main():
+    if os.path.exists(STOP_FILE):
+        os.remove(STOP_FILE)
+        print(f"前回の停止ファイルを削除しました: {STOP_FILE}")
+    print(f"安全停止: {STOP_FILE} を作成すると、自然長へ戻してから終了します")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
     os.makedirs(RESULT_DIR, exist_ok=True)
@@ -498,35 +571,10 @@ def main():
     state_buf = StateBuffer(PAST_SEQ, angle_scaler, target_scaler,
                             rel_coord_scaler, base_angle)
 
-    # バッファウォームアップ（PAST_SEQ分の初期状態を蓄積）
-    print(f"バッファウォームアップ中（{PAST_SEQ}ステップ）...")
-    wm_next = time.perf_counter() + INTERVAL
-    pushed, last_pos_f = 0, None
-    while pushed < PAST_SEQ:
-        with data_lock:
-            pos = shared["pos"]
-        if pos is None:
-            if last_pos_f is None:
-                # マーカ初検出まで待つ（0 をフィルタに入れると初期値が狂うため）
-                print("\r  マーカ検出待ち...", end="", flush=True)
-                time.sleep(INTERVAL)
-                wm_next = time.perf_counter() + INTERVAL
-                continue
-            pos_f = last_pos_f            # 見失い中は直前の値を保持
-        else:
-            pos_f = np.array(kf.update(pos))
-        last_pos_f = pos_f
-        pushed += 1
-        motor.communicate()
-        state_buf.push(pos_f, motor.read_angles.copy(),
-                       motor.target_pull_mm.copy())
-        now = time.perf_counter()
-        if wm_next - now > 0:
-            time.sleep(wm_next - now)
-        wm_next += INTERVAL
-    print("ウォームアップ完了")
-
+    # ウォームアップ以降は try の中で行う（Ctrl+C・停止ファイルでも必ず終了処理を通す）
     try:
+        warmup(motor, kf, state_buf, tracker)
+
         if mode == "1":
             print(f"\nテストデータから{N_TRIALS}点をサンプリング...")
             targets = sample_target_positions(N_TRIALS)
@@ -537,6 +585,8 @@ def main():
 
     except KeyboardInterrupt:
         print("\n[Ctrl+C] 中断")
+    except StopRequested as e:
+        print(f"\n[停止] {e}")
 
     finally:
         print("\n終了処理中...")

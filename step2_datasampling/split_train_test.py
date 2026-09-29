@@ -150,6 +150,8 @@ def main():
             continue
         if not args.dry_run:
             dst = os.path.join(raw_dir, os.path.basename(f))
+            if os.path.abspath(f) == os.path.abspath(dst):
+                continue                  # raw/ のファイルを分割し直した場合は移動しない
             shutil.move(f, dst)
             print(f"  元ファイルを移動: {dst}")
 

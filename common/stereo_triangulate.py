@@ -7,6 +7,55 @@ import cv2
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 import config
 
+def open_camera(idx, role):
+    """
+    config.toml [camera] の設定でカメラを開く（role = "top" / "under"）
+      - DSHOW + YUY2（非圧縮）+ FPS 未指定だと 1280x720 で約4fps しか出ないため、形式・FPS を指定する
+      - 自動露出だと照明の変化で露出・ゲインが変わり、マーカが検出できなくなる／露出時間が延びて fps が落ちるため、
+        露出・ゲイン・ホワイトバランスを固定する（外部アプリで設定した値がカメラに残っていても上書きする）
+    """
+    c = config.load()["camera"]
+    props = [(cv2.CAP_PROP_FRAME_WIDTH, c["width"]),
+             (cv2.CAP_PROP_FRAME_HEIGHT, c["height"]),
+             (cv2.CAP_PROP_FPS, c["fps"])]
+    if c["fourcc"]:
+        props.insert(0, (cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*c["fourcc"])))
+    if c["backend"] == "DSHOW":
+        # DSHOW はオープン時にまとめて指定しないと形式（MJPG）が反映されない
+        cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW, [v for p in props for v in p])
+    elif c["backend"] == "MSMF":
+        # MSMF はオープン時の形式指定を受け付けないので、開いてから1項目ずつ設定する
+        cap = cv2.VideoCapture(idx, cv2.CAP_MSMF)
+        for prop, val in props:
+            cap.set(prop, val)
+    else:
+        raise ValueError(f"[camera] backend が不正です: {c['backend']}")
+
+    # 露出・ゲイン・ホワイトバランスの固定（DSHOW は露出値を設定すると手動露出になる）
+    # 映像の取得開始時にカメラ側の自動設定に戻されることがあるため、1フレーム読んでから設定する
+    # 設定が反映されないことがあるため（C920e）、読み戻して確認し、違っていれば最大5回設定し直す
+    if c["fix_exposure"]:
+        cap.read()
+        fixed = [(cv2.CAP_PROP_AUTO_WB, 0, "WB自動", 0),
+                 (cv2.CAP_PROP_WB_TEMPERATURE, c["wb_temperature"], "WB温度", 10),
+                 (cv2.CAP_PROP_EXPOSURE, c[f"exposure_{role}"], "露出", 0),
+                 (cv2.CAP_PROP_GAIN, c[f"gain_{role}"], "ゲイン", 2)]       # ゲインは内部で ±1 程度丸められる
+        for attempt in range(5):
+            for prop, val, _, _ in fixed:
+                cap.set(prop, val)
+            for _ in range(5):
+                cap.read()
+            mismatch = [f"{name}={cap.get(prop):g}（設定 {val}）" for prop, val, name, tol in fixed
+                        if abs(cap.get(prop) - val) > tol]
+            if not mismatch:
+                break
+        if mismatch:
+            print(f"[Warning] {role} カメラの設定が反映されていません: {', '.join(mismatch)}")
+        elif attempt > 0:
+            print(f"  {role} カメラ: 露出・ゲインの設定が {attempt + 1} 回目で反映されました")
+    return cap
+
+
 class StereoTracker:
     def __init__(self, cam_top_idx=None, cam_under_idx=None):
         cfg = config.load()
@@ -48,6 +97,7 @@ class StereoTracker:
         # 診断用：直近フレームの両方式の結果（フィルタ前、ロボット座標）とエピポーラ誤差
         self.last_raw = {"legacy": None, "calibrated": None}
         self.last_epipolar_px = None
+        self.last_centers = (None, None)
 
         # マーカ検出パラメータ
         self.lower_green = np.array(mk["hsv_lower"], dtype=np.uint8)
@@ -93,28 +143,9 @@ class StereoTracker:
             raise e
 
     def _init_cameras(self, idx_l, idx_r):
-        # バックエンド・形式・FPS は config.toml [camera]。
-        # DSHOW + YUY2（非圧縮）+ FPS 未指定だと 1280x720 で約4fps しか出ない
-        self.cap_top = self._open_camera(idx_l)
-        self.cap_under = self._open_camera(idx_r)
-
-    def _open_camera(self, idx):
-        c = self.cam_cfg
-        props = [(cv2.CAP_PROP_FRAME_WIDTH, c["width"]),
-                 (cv2.CAP_PROP_FRAME_HEIGHT, c["height"]),
-                 (cv2.CAP_PROP_FPS, c["fps"])]
-        if c["fourcc"]:
-            props.insert(0, (cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*c["fourcc"])))
-        if c["backend"] == "DSHOW":
-            # DSHOW はオープン時にまとめて指定しないと形式（MJPG）が反映されない
-            return cv2.VideoCapture(idx, cv2.CAP_DSHOW, [v for p in props for v in p])
-        if c["backend"] == "MSMF":
-            # MSMF はオープン時の形式指定を受け付けないので、開いてから1項目ずつ設定する
-            cap = cv2.VideoCapture(idx, cv2.CAP_MSMF)
-            for prop, val in props:
-                cap.set(prop, val)
-            return cap
-        raise ValueError(f"[camera] backend が不正です: {c['backend']}")
+        # バックエンド・形式・FPS・露出などは config.toml [camera]
+        self.cap_top = open_camera(idx_l, "top")
+        self.cap_under = open_camera(idx_r, "under")
 
 # 変更後（55〜67行目）
     def _transform_to_robot_coords(self, cam_x, cam_y, cam_z, method=None):
@@ -254,6 +285,7 @@ class StereoTracker:
         # --- マーカー検出処理（計算用回転画像を使用）---
         center_l = self._get_marker_center(frame_l_calc)
         center_r = self._get_marker_center(frame_r_calc)
+        self.last_centers = (center_l, center_r)   # 診断用
 
         current_pos = None
 
