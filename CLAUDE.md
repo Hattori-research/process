@@ -7,12 +7,13 @@
 - 各繊維のガイドパーツが隣接繊維との間で滑走して変形する
 - 繊維長200mm、フレーム 350×350×445.5mm、機構先端にマーカ
 - ステレオカメラ2台でマーカ位置を取得、モータ4つでワイヤを引張、エンコーダ値を取得
-- サンプリングレート 20Hz
+- サンプリングレート 16Hz（2026-09-29 に 20Hz から変更。カメラ取得が約16fps のため）
 
 ## 制御手法（参考: Thuruthel et al., IEEE T-RO, 2019, doi:10.1109/TRO.2018.2878318）
 1. データ取得
 2. RNNで順モデルを学習
    入力: 位置 x(i-0〜39), エンコーダ値 A(i-0〜39), 引張量 W(i+1〜20)
+   ※ 16Hz 化にあたり秒数を維持（過去2秒・未来1秒）→ 実装は x,A(i-0〜31), W(i+1〜16)
    出力: 位置 x(i+1〜10)
 3. 順モデルとランダムシューティング法（2000シューティング×5000回）で逆方向のデータセットを5000個作成
 4. MLPコントローラを学習
@@ -49,7 +50,7 @@ process/stepN_<内容>/<スクリプト>.py の形でステップごとに分け
 - `Data/` は .gitignore 対象。構成: `rnn_csv/{train,test}/`, `Weights/`, `mp4/`, `png/`, `control_results/{,video}/`
 - ハードウェア設定（config.toml [camera] [motor]）: モータ `COM3` / 115200bps、カメラ index 上=1・下=0、1280×720
 - `TrajectoryNet` / `ControllerMLP` は common/models.py に一本化（step3・4・5・check_narx から import）
-- 共通ハイパーパラメータ（config.toml [model]）: `past_seq=40`, `future_seq=20`, `w_min/w_max=0/16mm`, `cut_initial_steps=100`, `movement_limit=120mm`, `jump_thresh=150mm`
+- 共通ハイパーパラメータ（config.toml [model]）: `past_seq=32`（2秒）, `future_seq=16`（1秒）, `w_min/w_max=0/16mm`, `cut_initial_steps=80`（5秒）, `movement_limit=120mm`, `jump_thresh=150mm`
 
 ## step1_cameracalibration（カメラ校正・3次元計測）
 | ファイル | 内容 |
@@ -86,19 +87,21 @@ process/stepN_<内容>/<スクリプト>.py の形でステップごとに分け
 ## step2_datasampling（データ取得）
 - common/motor_control.py: `MotorController`。プーリ径16mmで引張量[mm]→角度[deg]変換、`MAX_PULL=60mm`、電流0.1。送信 `"電流×4,角度×4e\n"`、受信 `"time (角度 電流 目標)×4"`
 - data_sampling.py: 2秒ごとにランダムな1本のワイヤへ U(0,16)mm を**累積加算**し、どれかが累積30mm以上になると全ワイヤを0に戻す
-  - 目標 72000 サンプル（20Hz×60分）。通信途絶時は自動で再接続して継続
+  - 目標 57600 サンプル（16Hz×60分）。通信途絶時は自動で再接続して継続
   - マーカ検出時のみ CSV に記録（未検出フレームは欠落 → 時系列に隙間ができうる）
   - CSV列: `Sample_Count, Time, Target_W0-3, Angle_W0-3, Cur_W0-3, X, Y, Z` → `Data/rnn_csv/<下限>_<上限>_<累積上限>_<日時>.csv`
   - 取得したCSVは split_train_test.py で `Data/rnn_csv/train/` と `test/` に振り分ける
 - split_train_test.py: 1本の長いCSVを時間ブロック（config.toml [split]、既定 5分）に分け、4ブロックに1つを test にする（約 3:1、時間的に偏らない）
   - 各ブロックの先頭に元ファイルの1行目（自然状態 = ゼロ点）を付ける（step3/4 が各CSVの1行目をゼロ点に使うため）
+  - 分割前に Time 列をもとに sampling_rate の等間隔へ補間（Target_W は直前値保持、他は線形）。0.5秒超の途切れは補間せず区切る
   - 分割した元ファイルは `Data/rnn_csv/raw/` に移動。`--dry-run` で振り分けの確認のみ
+  - 2026-09-28 取得の60分データ（約18Hz 記録）を 16Hz に補間して分割済み: train 10ファイル 46142行 / test 3ファイル 17555行
 - `Data/rnn_csv/legacy/`: 2026-09-28 以前の旧方式（legacy 三角測量・約4fps）のデータ。学習には使わない
 
 ## step3_narx（順モデル学習） train_rnn.py
-- 入力: 過去40ステップの [エンコーダ相対値 A(4) + 相対位置 x(3)] = (40,7)、未来20ステップの目標引張量 W (20,4)
+- 入力: 過去32ステップの [エンコーダ相対値 A(4) + 相対位置 x(3)] = (32,7)、未来16ステップの目標引張量 W (16,4)
 - 構造: LSTM(7→64, 2層) の最終出力 + W平坦化 → FC(128-128) → 出力
-- 出力: 未来**20**ステップの相対位置 (20,3)（仕様の「x(i+1〜10)」とは異なる）
+- 出力: 未来**16**ステップ（1秒）の相対位置 (16,3)（仕様の「x(i+1〜10)」とは異なる）
 - 位置は時刻 t-1 の現在位置を原点とする相対座標。エンコーダは各CSVの1行目基準
 - StandardScaler（target / angle / rel_coord）を `Data/Weights/*.pkl` に保存、モデルは `best_trajectory_model.pth`
 - 8:2 で train/val 分割、Adam, MSE, early stopping(20)。test で RMSE[mm] を表示
@@ -107,23 +110,23 @@ process/stepN_<内容>/<スクリプト>.py の形でステップごとに分け
 - **仕様との差異**: ランダムシューティングによる逆データセット生成は未実装。代わりに以下2手法を比較
   - 手法A（NARX間接）: 重み固定のNARXにコントローラ出力を通し、予測軌道と実データの未来軌道のMSEで逆伝播 → `best_controller_narx.pth`
   - 手法B（直接逆モデル）: 実データの未来引張量を教師に直接回帰 → `best_controller_direct.pth`
-- `ControllerMLP` 入力: 現在位置(3, 常に0) + 目標相対位置(3, t+19時点) + 過去W(40×4) + 過去A(40×4) = **326次元**（仕様の7次元とは異なる）
+- `ControllerMLP` 入力: 現在位置(3, 常に0) + 目標相対位置(3, t+15時点) + 過去W(32×4) + 過去A(32×4) = **262次元**（仕様の7次元とは異なる）
 - 構造: [Linear(256)-LayerNorm-ReLU-Dropout(0.1)]×3 → Linear → Sigmoid
-- 出力: 未来20ステップ × 4本 の引張量（[0,1] を 0〜16mm にスケール）
+- 出力: 未来16ステップ × 4本 の引張量（[0,1] を 0〜16mm にスケール）
 - AdamW, ReduceLROnPlateau, grad clip 1.0, early stopping(20)
 - check_narx.py: ゼロ入力＋一定8mm引張でのNARX出力確認用
 
 ## step5_realtime（実機リアルタイム制御） realtime_controll.py
 - 起動時にコントローラ（A/B）とモード（[1] testデータから20点サンプルした目標へのランダム追従 / [2] キーボードでXYZ入力）を選択
 - カメラは別スレッドで取得（動画を `Data/control_results/video/` に保存）
-- 各ステップでコントローラ出力20ステップのうち**先頭1ステップのみ**を指令（receding horizon 的運用）
-- 1目標あたり `HOLD_STEPS=40`（2秒）制御後、自然長へ戻す。結果CSVを `Data/control_results/` に保存
+- 各ステップでコントローラ出力16ステップのうち**先頭1ステップのみ**を指令（receding horizon 的運用）
+- 1目標あたり `HOLD_STEPS=32`（2秒）制御後、自然長へ戻す。結果CSVを `Data/control_results/` に保存
 - エンコーダ基準値は起動時の値（学習時は各CSVの1行目）
 - `POSITION_THRESH` は動画上の誤差表示の色分けにのみ使用（過去コードの名残だった `STABLE_STEPS` は削除済み）
 - 起動時のウォームアップでは、マーカを初めて検出するまで待ってから状態バッファを貯める（見失い中は直前の位置を保持）
 
 ## 仕様（制御手法）と実装の主な差分まとめ
-1. 順モデル出力: 仕様 10ステップ → 実装 20ステップ
+1. 順モデル出力: 仕様 10ステップ → 実装 16ステップ（16Hz で 1秒）
 2. 逆データセット: 仕様 ランダムシューティング(2000×5000) → 未実装（NARX経由の勾配学習／直接逆モデルで代替）
-3. コントローラ入力: 仕様 Δx+A の7次元 → 実装 326次元（過去40ステップ分のW・Aを含む）
-4. コントローラ出力: 仕様 W 4次元 → 実装 20×4（実機では先頭のみ使用）
+3. コントローラ入力: 仕様 Δx+A の7次元 → 実装 262次元（過去32ステップ分のW・Aを含む）
+4. コントローラ出力: 仕様 W 4次元 → 実装 16×4（実機では先頭のみ使用）

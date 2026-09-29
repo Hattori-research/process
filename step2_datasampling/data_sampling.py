@@ -148,7 +148,7 @@ def main():
                         motor.set_targets(total_tensile.tolist())
                         last_command_time = current_time
 
-                    # --- 【サンプリング】20Hzで通信と記録 ---
+                    # --- 【サンプリング】sampling_rate [Hz] で通信と記録 ---
                     if motor.communicate():
                         fail_count = 0 
                         with data_lock:

@@ -26,7 +26,7 @@ control_video    = "Data/control_results/video"
 triangulation_check = "Data/triangulation_check"   # check_triangulation.py の記録先
 
 [system]
-sampling_rate = 20.0  # [Hz]
+sampling_rate = 16.0  # [Hz]（2026-09-29 20→16Hz。カメラ取得が約16fps のため）
 
 [camera]
 top_idx   = 1     # 上カメラ（stereo の left）
@@ -88,7 +88,7 @@ return_current  = 0.1    # disconnect 時に初期位置へ戻すときの電流
 
 [sampling]  # step2 データ取得
 command_interval  = 2.0     # 引張指令の更新間隔 [s]
-target_samples    = 72000   # 目標サンプル数（20Hz × 60s × 60min）
+target_samples    = 57600   # 目標サンプル数（16Hz × 60s × 60min）
 pull_min          = 0.0     # 1回の追加引張量の下限 [mm]
 pull_max          = 16.0    # 1回の追加引張量の上限 [mm]
 pull_total_max    = 30.0    # 累積引張量の上限 [mm]（超えたら全ワイヤを0に戻す）
@@ -101,16 +101,18 @@ block_minutes = 5.0   # 1ブロックの長さ [min]（行数 = block_minutes ×
 test_every    = 4     # test_every ブロックごとに1つを test にする（4 → 約 3:1。5 だと 60分で約17%）
 test_index    = 2     # 各グループの何番目（0始まり）を test にするか
 min_block_ratio = 0.5 # 末尾の端数ブロックがこの割合未満なら直前のブロックに結合
+resample      = true  # 分割前に Time 列をもとに sampling_rate の等間隔へ補間し直す
+max_gap_sec   = 0.5   # これより長い記録の途切れ（マーカ見失い等）では補間せず、そこでデータを区切る [s]
 
 # ----------------------------------------------------------
 # 学習（step3〜5 共通）※ 構造に関わる値を変えたら再学習が必要
 # ----------------------------------------------------------
 [model]
-past_seq          = 40      # 過去ステップ数（2秒）
-future_seq        = 20      # 未来ステップ数（1秒）
+past_seq          = 32      # 過去ステップ数（16Hz で 2秒）
+future_seq        = 16      # 未来ステップ数（16Hz で 1秒）
 w_min             = 0.0     # コントローラ出力の引張量範囲 [mm]
 w_max             = 16.0
-cut_initial_steps = 100     # 各CSVの先頭で捨てるステップ数
+cut_initial_steps = 80      # 各CSVの先頭で捨てるステップ数（16Hz で 5秒）
 movement_limit    = 120.0   # 初期位置からの座標クリップ幅 [mm]
 jump_thresh       = 150.0   # ウィンドウ内1ステップ変化量がこれを超えたらサンプル除外 [mm]
 
@@ -142,7 +144,7 @@ train_ratio   = 0.8      # train / val 分割
 split_seed    = 42
 
 [realtime]  # step5 実機制御
-hold_steps        = 40      # 1目標あたりの制御ステップ数（2秒）
+hold_steps        = 32      # 1目標あたりの制御ステップ数（16Hz で 2秒）
 n_trials          = 20      # ランダム点追従テストの試行回数
 position_thresh   = 10.0    # 到達判定の閾値 [mm]（動画上の誤差表示の色分けに使用）
 target_seed       = 42      # 目標点サンプリングの乱数シード

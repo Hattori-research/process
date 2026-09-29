@@ -28,6 +28,5 @@ w_tensor = torch.from_numpy(w_scaled.astype(np.float32))
 with torch.no_grad():
     pred = narx(x_past, w_tensor)
     print(f"引張量{TEST_PULL_MM}mm時の予測位置変化 (相対座標mm):")
-    print(f"  step+1:  {pred[0, 0].numpy()}")
-    print(f"  step+10: {pred[0, 9].numpy()}")
-    print(f"  step+20: {pred[0, 19].numpy()}")
+    for k in (1, FUTURE_SEQ // 2, FUTURE_SEQ):
+        print(f"  step+{k:<3d}: {pred[0, k - 1].numpy()}")
