@@ -36,6 +36,50 @@ def create_video_writer(fps=20.0, width=1280, height=720):
     print(f"[Video] 録画を開始します: {filename}")
     return cv2.VideoWriter(filename, fourcc, fps, (width, height))
 
+def next_command(mode, cur, scfg, rng):
+    """
+    次の引張指令 [mm]（4本）を返す。返り値: (新しい指令, 表示用メッセージ)
+      incremental : 1本に U(pull_min, pull_max) を引き足す。wire_max を超えるなら全ワイヤを 0（自然長）に戻す（従来の方式）
+      random_multi: ランダムに選んだ n 本（multi_change_min〜max）を U(0, wire_max) に変える（緩める動きも含む）
+      pretension  : 全ワイヤに予張力 pretension_mm をかけた状態を中心に、n 本を中心 ± pretension_spread に変える
+    random_multi / pretension では release_prob の確率で全ワイヤを 0 に戻す（自然状態からの経路も含めるため）。
+    どのモードでも各ワイヤは [0, wire_max]、4本合計は sum_max 以下に収める。
+    """
+    wmax, smax = scfg["wire_max"], scfg["sum_max"]
+    cur = np.asarray(cur, dtype=float)
+    if mode == "incremental":
+        i = int(rng.integers(4))
+        amt = rng.uniform(scfg["pull_min"], scfg["pull_max"])
+        if cur[i] + amt >= wmax:
+            return np.zeros(4), f"W{i} が上限到達 → 全ワイヤを自然長に戻す"
+        new = cur.copy()
+        new[i] += amt
+        msg = f"W{i} を追加引張(+{amt:.1f}mm)"
+    else:
+        if rng.random() < scfg["release_prob"]:
+            return np.zeros(4), "全ワイヤを自然長に戻す"
+        center, spread = (wmax / 2, wmax / 2) if mode == "random_multi" else (scfg["pretension_mm"], scfg["pretension_spread"])
+        if mode == "pretension" and not cur.any():
+            return np.full(4, center), f"予張力 {center}mm をかける"
+        k = int(rng.integers(scfg["multi_change_min"], scfg["multi_change_max"] + 1))
+        idx = rng.choice(4, size=k, replace=False)
+        new = cur.copy()
+        new[idx] = np.clip(center + rng.uniform(-spread, spread, size=k), 0.0, wmax)
+        msg = f"W{sorted(idx.tolist())} を変更"
+
+    # 4本合計の上限：今回変えたワイヤ（incremental では引き足したワイヤ）を優先して縮める
+    new = np.clip(new, 0.0, wmax)
+    if new.sum() > smax:
+        changed = new != cur
+        excess = new.sum() - smax
+        if new[changed].sum() > 0:
+            new[changed] = np.maximum(new[changed] - excess * new[changed] / new[changed].sum(), 0.0)
+        if new.sum() > smax:                          # それでも超える場合は全体を縮める
+            new *= smax / new.sum()
+        msg += f"（合計上限 {smax}mm で縮小）"
+    return new, msg
+
+
 def main():
     global shared_data
     import argparse
@@ -67,10 +111,12 @@ def main():
     TARGET_SAMPLES = args.samples or scfg["target_samples"]
     collected_samples = 0
 
-    #--引張量の設定
-    under_limit = scfg["pull_min"]
-    upper_limit = scfg["pull_max"]
-    total_max = scfg["pull_total_max"]
+    #--引張量の設定（引き方のモードは config.toml [sampling] mode）
+    MODE = scfg["mode"]
+    if MODE not in ("incremental", "random_multi", "pretension"):
+        raise ValueError(f"[sampling] mode が不正です: {MODE}")
+    rng = np.random.default_rng()
+    print(f"引き方のモード: {MODE}  各ワイヤ上限 {scfg['wire_max']}mm  4本合計上限 {scfg['sum_max']}mm")
 
     # --- 画像/動画保存設定 ---
     SAVE_MODE = scfg["save_mode"]                 # "mp4" または "png" で切り替え
@@ -81,7 +127,7 @@ def main():
     # csv保存先
     timestr = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     csv_filename = os.path.join(config.path("rnn_csv_dir"),
-                                f"{under_limit}_{upper_limit}_{total_max}_{timestr}.csv")
+                                f"{MODE}_{scfg['wire_max']:g}_{timestr}.csv")
 
 
     kf = KalmanFilter3D(process_noise=kcfg["process_noise_sampling"],
@@ -150,18 +196,10 @@ def main():
                     current_time = t_loop - start_time
                     absolute_time = time.time()
                     
-                    # --- 【指令更新】2秒ごとに相対引張量を計算 ---
+                    # --- 【指令更新】command_interval ごとに引張量を更新（引き方は MODE）---
                     if current_time - last_command_time >= COMMAND_INTERVAL:
-                        w_idx = np.random.randint(0, 4)
-                        pull_amount = np.random.uniform(under_limit, upper_limit)
-                        
-                        if total_tensile[w_idx] + pull_amount >= total_max:
-                            print(f"\n[{current_time:.1f}s] W{w_idx}が限界到達！ゼロにして自然長に戻します。")
-                            total_tensile = np.zeros(4)
-                        else:
-                            total_tensile[w_idx] += pull_amount
-                            print(f"\n[{current_time:.1f}s] W{w_idx} を追加引張(+{pull_amount:.1f}mm) -> トータル: {total_tensile.round(1)}mm")
-
+                        total_tensile, msg = next_command(MODE, total_tensile, scfg, rng)
+                        print(f"\n[{current_time:.1f}s] {msg} -> {total_tensile.round(1)}mm（合計 {total_tensile.sum():.1f}）")
                         motor.set_targets(total_tensile.tolist())
                         last_command_time = current_time
 

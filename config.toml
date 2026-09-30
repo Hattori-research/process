@@ -91,16 +91,26 @@ baudrate        = 115200
 timeout         = 1.0    # [s]
 pulley_diameter = 16.0   # [mm] 引張量[mm] → 角度[deg] 変換に使用
 min_pull        = 0.0    # 安全リミッタ下限 [mm]
-max_pull        = 60.0   # 安全リミッタ上限 [mm]
+max_pull        = 30.0   # 安全リミッタ上限 [mm]（2026-09-30 60→30。指令上限 [sampling] wire_max とそろえる。単独 40mm・全方向同時 20mm の実績あり）
 max_current     = 0.1    # 通常時の電流指令
 return_current  = 0.1    # disconnect 時に初期位置へ戻すときの電流指令
 
 [sampling]  # step2 データ取得
 command_interval  = 2.0     # 引張指令の更新間隔 [s]
 target_samples    = 64800   # 目標サンプル数（18Hz × 60s × 60min）
-pull_min          = 0.0     # 1回の追加引張量の下限 [mm]
-pull_max          = 16.0    # 1回の追加引張量の上限 [mm]
-pull_total_max    = 30.0    # 累積引張量の上限 [mm]（超えたら全ワイヤを0に戻す）
+# 引き方のモード（2026-09-30 追加）: "incremental"（従来：1本ずつ引き足し、上限で全解放）
+#   / "random_multi"（ランダムな n 本を 0〜wire_max のランダム値に変更。緩める動きを含む）
+#   / "pretension"（予張力 pretension_mm を中心に ±pretension_spread で変更）
+mode              = "random_multi"
+wire_max          = 30.0    # 各ワイヤの引張量の上限 [mm]（全モード共通）
+sum_max           = 100.0   # 4本合計の上限 [mm]（2026-09-29 取得データの最大が 100mm。全方向同時 20mm=合計80mm の実績あり）
+pull_min          = 0.0     # incremental: 1回の追加引張量の下限 [mm]
+pull_max          = 16.0    # incremental: 1回の追加引張量の上限 [mm]
+multi_change_min  = 1       # random_multi / pretension: 1回の指令で変えるワイヤ本数の最小
+multi_change_max  = 4       # 同 最大
+release_prob      = 0.05    # random_multi / pretension: 全ワイヤを自然長に戻す確率（自然状態からの経路も含めるため）
+pretension_mm     = 10.0    # pretension: 予張力（中心）[mm]
+pretension_spread = 10.0    # pretension: 中心からの変化幅 [mm]（0〜20mm の範囲で引く・緩める）
 save_mode         = "mp4"   # "mp4" または "png"
 save_interval_sec = 600     # 動画ローテーション / スナップショット間隔 [s]
 camera_warmup_sec = 10.0    # カメラ初期化後の待ち時間 [s]
@@ -120,7 +130,7 @@ max_gap_sec   = 0.5   # これより長い記録の途切れ（マーカ見失�
 past_seq          = 36      # 過去ステップ数（18Hz で 2秒）
 future_seq        = 18      # 未来ステップ数（18Hz で 1秒）
 w_min             = 0.0     # コントローラ出力の引張量範囲 [mm]
-w_max             = 16.0
+w_max             = 16.0    # コントローラ出力の上限。新しい引き方（上限 30mm）のデータで学習し直すときに 30 に上げる（今の重みのまま変えると出力が約2倍になる）
 cut_initial_steps = 90      # 各CSVの先頭で捨てるステップ数（18Hz で 5秒）
 movement_limit    = 120.0   # 初期位置からの座標クリップ幅 [mm]
 jump_thresh       = 150.0   # ウィンドウ内1ステップ変化量がこれを超えたらサンプル除外 [mm]
