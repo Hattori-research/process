@@ -8,3 +8,5 @@
 Data/
 __pycache__/
 *.pyc
+# docs/ の図（考察文書用）は追跡する
+!docs/*.png
