@@ -65,6 +65,9 @@ STOP_FILE         = config.path("stop_file")    # このファイルを置くと
 RETURN_MIN_SEC    = rcfg["return_min_sec"]      # 試行後の自然長への復帰：最短時間 [s]
 RETURN_MAX_SEC    = rcfg["return_max_sec"]      # 同：最長時間 [s]
 RETURN_SETTLE_MM  = rcfg["return_settle_mm"]    # 同：直近1秒の移動がこれ未満なら落ち着いたとみなす [mm]
+INTEGRAL_GAIN     = rcfg["integral_gain"]       # 目標の積分補正ゲイン [1/s]（0 で無効）
+INTEGRAL_LIMIT_MM = rcfg["integral_limit_mm"]   # 積分補正量の上限 [mm]
+INTEGRAL_START_MM = rcfg["integral_start_mm"]   # 目標までの距離がこれ未満のときだけ積算する [mm]（接近中の積算による行き過ぎ防止）
 
 
 class StopRequested(Exception):
@@ -217,6 +220,30 @@ def infer_w(controller, state_buf, target_pos, device):
 # ========================================================
 # 結果ロガー
 # ========================================================
+class TargetIntegrator:
+    """
+    目標の積分補正：コントローラに渡す目標を「目標と現在位置のずれの積算」でずらし、
+    目標の手前で止まる・自然状態側へ戻るといった一定のずれを打ち消す（学習し直し不要）。
+      補正後の目標 = 目標 + INTEGRAL_GAIN × ∫(目標 - 現在位置) dt
+      目標までの距離が INTEGRAL_START_MM 未満のときだけ積算し、補正量は INTEGRAL_LIMIT_MM で打ち切る
+    """
+    def __init__(self):
+        self.acc = np.zeros(3)
+
+    def command(self, target, pos):
+        err = np.asarray(target) - np.asarray(pos)
+        if INTEGRAL_GAIN > 0 and np.linalg.norm(err) < INTEGRAL_START_MM:
+            self.acc += err * INTERVAL
+            corr = INTEGRAL_GAIN * self.acc
+            n = np.linalg.norm(corr)
+            if n > INTEGRAL_LIMIT_MM:                 # 上限で打ち切り（積算値も合わせて縮める）
+                self.acc *= INTEGRAL_LIMIT_MM / n
+        return np.asarray(target) + self.correction()
+
+    def correction(self):
+        return INTEGRAL_GAIN * self.acc
+
+
 class ResultLogger:
     def __init__(self, method_name):
         os.makedirs(RESULT_DIR, exist_ok=True)
@@ -224,13 +251,14 @@ class ResultLogger:
         self.path = os.path.join(RESULT_DIR, f"{method_name}_{ts}.csv")
         self.rows = []
 
-    def log(self, trial, step, target, current, error, w_cmd):
+    def log(self, trial, step, target, current, error, w_cmd, corr=(0.0, 0.0, 0.0)):
         self.rows.append({
             "trial": trial, "step": step,
             "tgt_x": target[0],  "tgt_y": target[1],  "tgt_z": target[2],
             "cur_x": current[0], "cur_y": current[1],  "cur_z": current[2],
             "error_3d": error,
             "w0": w_cmd[0], "w1": w_cmd[1], "w2": w_cmd[2], "w3": w_cmd[3],
+            "corr_x": corr[0], "corr_y": corr[1], "corr_z": corr[2],   # 積分補正量 [mm]
         })
 
     def save(self):
@@ -295,6 +323,7 @@ def run_random_test(controller, motor, kf, state_buf,
         
         errors_all = []
         loop_times = []                     # 1周の処理時間（sampling_rate を維持できているかの確認用）
+        integ = TargetIntegrator()          # 目標の積分補正（試行ごとにリセット）
         next_time = time.perf_counter() + INTERVAL
 
         for step in range(HOLD_STEPS):
@@ -317,8 +346,9 @@ def run_random_test(controller, motor, kf, state_buf,
             state_buf.push(pos_f, motor.read_angles.copy(),
                            motor.target_pull_mm.copy())
 
+            tgt_cmd = integ.command(target, pos_f)
             if state_buf.is_ready():
-                w_next = infer_w(controller, state_buf, target, device)
+                w_next = infer_w(controller, state_buf, tgt_cmd, device)
                 motor.set_targets(np.clip(w_next, W_MIN, W_MAX).tolist())
 
             err = np.linalg.norm(pos_f - target)
@@ -334,7 +364,7 @@ def run_random_test(controller, motor, kf, state_buf,
                     "w_cmd":   motor.target_pull_mm.copy(),
                 }
             logger.log(trial_i, step, target, pos_f, err,
-                       motor.target_pull_mm.copy())
+                       motor.target_pull_mm.copy(), integ.correction())
 
             print(f"\r  step={step:3d}  "
                   f"({pos_f[0]:6.1f},{pos_f[1]:6.1f},{pos_f[2]:6.1f})  "
@@ -406,6 +436,7 @@ def run_manual_mode(controller, motor, kf, state_buf, device):
             continue
 
         print(f"  目標: {target}  {HOLD_STEPS}ステップ制御します...")
+        integ = TargetIntegrator()
         next_time = time.perf_counter() + INTERVAL
 
         for step in range(HOLD_STEPS):
@@ -427,8 +458,9 @@ def run_manual_mode(controller, motor, kf, state_buf, device):
             state_buf.push(pos_f, motor.read_angles.copy(),
                            motor.target_pull_mm.copy())
 
+            tgt_cmd = integ.command(target, pos_f)
             if state_buf.is_ready():
-                w_next = infer_w(controller, state_buf, target, device)
+                w_next = infer_w(controller, state_buf, tgt_cmd, device)
                 motor.set_targets(np.clip(w_next, W_MIN, W_MAX).tolist())
 
             err = np.linalg.norm(pos_f - target)

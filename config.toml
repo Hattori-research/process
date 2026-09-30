@@ -155,7 +155,7 @@ train_ratio   = 0.8      # train / val 分割
 split_seed    = 42
 
 [realtime]  # step5 実機制御
-hold_steps        = 36      # 1目標あたりの制御ステップ数（18Hz で 2秒）
+hold_steps        = 72      # 1目標あたりの制御ステップ数（18Hz で 4秒。2026-09-30 に 2秒→4秒）
 n_trials          = 20      # ランダム点追従テストの試行回数
 position_thresh   = 10.0    # 到達判定の閾値 [mm]（動画上の誤差表示の色分けに使用）
 target_seed       = 42      # 目標点サンプリングの乱数シード
@@ -165,3 +165,7 @@ return_min_sec    = 3.0     # 試行後に自然長へ戻す最短時間 [s]（�
 return_max_sec    = 15.0    # 同 最長時間 [s]
 return_settle_mm  = 0.5     # 直近1秒の移動がこれ未満なら落ち着いたとみなして次の試行へ [mm]
 warmup_timeout_sec = 30.0   # 起動時のマーカ初検出待ちの上限 [s]（超えたら原因を表示して安全停止）
+# 目標の積分補正（2026-09-30 追加。目標付近で保持できず戻る問題への対策、学習し直し不要）
+integral_gain     = 0.5     # 補正後の目標 = 目標 + gain × ∫(目標 - 現在位置)dt [1/s]。0 で無効
+integral_limit_mm = 15.0    # 補正量の上限 [mm]
+integral_start_mm = 15.0    # 目標までの距離がこれ未満のときだけ積算（接近中の積算による行き過ぎを防ぐ）[mm]
