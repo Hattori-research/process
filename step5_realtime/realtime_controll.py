@@ -69,6 +69,8 @@ INTEGRAL_GAIN     = rcfg["integral_gain"]       # 目標の積分補正ゲイン
 INTEGRAL_LIMIT_MM = rcfg["integral_limit_mm"]   # 積分補正量の上限 [mm]
 INTEGRAL_START_MM = rcfg["integral_start_mm"]   # 目標までの距離がこれ未満のときだけ積算する [mm]（接近中の積算による行き過ぎ防止）
 MAX_DW_MM         = rcfg["max_dw_mm"]           # 1ステップあたりの引張量の変化の上限 [mm]（0 で無効）
+DW_PER_ERR        = rcfg["dw_per_err"]          # 目標の近くでの変化の上限 = この係数 × 目標までの距離 [mm/mm]（0 で無効）
+MIN_DW_MM         = rcfg["min_dw_mm"]           # 同 下限 [mm]
 STALL_PULL_MM     = rcfg["stall_pull_mm"]       # 異常検知：どれかのワイヤをこれ以上引いているのに [mm]
 STALL_MOVE_MM     = rcfg["stall_move_mm"]       # 試行開始からの移動がこれ未満の状態が [mm]
 STALL_SEC         = rcfg["stall_sec"]           # これだけ続いたら安全停止する [s]（ワイヤ外れ等の確認用）
@@ -221,12 +223,19 @@ def infer_w(controller, state_buf, target_pos, device):
     return w_phys[0].cpu().numpy()                           # 次の1ステップ (4,)
 
 
-def limit_command(w_next, w_prev):
-    """引張量の指令を [W_MIN, W_MAX] に収め、直前の指令からの変化を ±MAX_DW_MM に制限する（急な引き込みによる飛び移りの抑制）"""
+def limit_command(w_next, w_prev, dist=None):
+    """引張量の指令を [W_MIN, W_MAX] に収め、直前の指令からの変化を制限する
+      上限 = MAX_DW_MM（急な引き込みによる飛び移りの抑制）
+      dist（目標までの距離 [mm]）を渡すと、上限を min(MAX_DW_MM, max(MIN_DW_MM, DW_PER_ERR × dist)) にする
+      → 目標の近くでは指令をゆっくり変え、到達後の行き来・行き過ぎを抑える
+    """
     w = np.clip(w_next, W_MIN, W_MAX)
     if MAX_DW_MM > 0:
+        dw = MAX_DW_MM
+        if dist is not None and DW_PER_ERR > 0:
+            dw = min(MAX_DW_MM, max(MIN_DW_MM, DW_PER_ERR * dist))
         w_prev = np.asarray(w_prev, dtype=float)
-        w = np.clip(w, w_prev - MAX_DW_MM, w_prev + MAX_DW_MM)
+        w = np.clip(w, w_prev - dw, w_prev + dw)
     return w
 
 
@@ -363,7 +372,7 @@ def run_random_test(controller, motor, kf, state_buf,
             tgt_cmd = integ.command(target, pos_f)
             if state_buf.is_ready():
                 w_next = infer_w(controller, state_buf, tgt_cmd, device)
-                motor.set_targets(limit_command(w_next, motor.target_pull_mm).tolist())
+                motor.set_targets(limit_command(w_next, motor.target_pull_mm, np.linalg.norm(pos_f - target)).tolist())
 
             err = np.linalg.norm(pos_f - target)
             errors_all.append(err)
@@ -490,7 +499,7 @@ def run_manual_mode(controller, motor, kf, state_buf, device):
             tgt_cmd = integ.command(target, pos_f)
             if state_buf.is_ready():
                 w_next = infer_w(controller, state_buf, tgt_cmd, device)
-                motor.set_targets(limit_command(w_next, motor.target_pull_mm).tolist())
+                motor.set_targets(limit_command(w_next, motor.target_pull_mm, np.linalg.norm(pos_f - target)).tolist())
 
             err = np.linalg.norm(pos_f - target)
             print(f"\r  step={step:3d}  "
