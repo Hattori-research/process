@@ -69,6 +69,9 @@ INTEGRAL_GAIN     = rcfg["integral_gain"]       # 目標の積分補正ゲイン
 INTEGRAL_LIMIT_MM = rcfg["integral_limit_mm"]   # 積分補正量の上限 [mm]
 INTEGRAL_START_MM = rcfg["integral_start_mm"]   # 目標までの距離がこれ未満のときだけ積算する [mm]（接近中の積算による行き過ぎ防止）
 MAX_DW_MM         = rcfg["max_dw_mm"]           # 1ステップあたりの引張量の変化の上限 [mm]（0 で無効）
+STALL_PULL_MM     = rcfg["stall_pull_mm"]       # 異常検知：どれかのワイヤをこれ以上引いているのに [mm]
+STALL_MOVE_MM     = rcfg["stall_move_mm"]       # 試行開始からの移動がこれ未満の状態が [mm]
+STALL_SEC         = rcfg["stall_sec"]           # これだけ続いたら安全停止する [s]（ワイヤ外れ等の確認用）
 
 
 class StopRequested(Exception):
@@ -334,6 +337,7 @@ def run_random_test(controller, motor, kf, state_buf,
         errors_all = []
         loop_times = []                     # 1周の処理時間（sampling_rate を維持できているかの確認用）
         integ = TargetIntegrator()          # 目標の積分補正（試行ごとにリセット）
+        p_start, stall_steps, stall_msg = None, 0, None   # 異常検知（引いても動かない）
         next_time = time.perf_counter() + INTERVAL
 
         for step in range(HOLD_STEPS):
@@ -363,6 +367,18 @@ def run_random_test(controller, motor, kf, state_buf,
 
             err = np.linalg.norm(pos_f - target)
             errors_all.append(err)
+
+            # 異常検知：引いているのに動かない状態が続いたら、この試行を打ち切って安全停止する
+            if p_start is None:
+                p_start = pos_f.copy()
+            w_max_now = float(np.max(motor.target_pull_mm))
+            moved = float(np.linalg.norm(pos_f - p_start))
+            stall_steps = stall_steps + 1 if (w_max_now >= STALL_PULL_MM and moved < STALL_MOVE_MM) else 0
+            if stall_steps >= STALL_SEC * SAMPLING_RATE:
+                stall_msg = (f"引いても動かない状態が {STALL_SEC:.1f}秒続きました（指令 {np.round(motor.target_pull_mm, 1)} mm、"
+                             f"移動 {moved:.1f}mm）。ワイヤ外れ・ガイド破損などを確認してください")
+                print(f"\n  [異常] {stall_msg}")
+                break
 
             with data_lock:
                 shared["display_info"] = {
@@ -406,6 +422,9 @@ def run_random_test(controller, motor, kf, state_buf,
 
         motor.set_targets([0.0] * 4)
         return_to_natural(motor, kf, state_buf)
+        if stall_msg:
+            logger.save()
+            raise StopRequested(stall_msg)
 
     finals = [r[0] for r in results if not np.isnan(r[0])]
     means  = [r[1] for r in results if not np.isnan(r[1])]
