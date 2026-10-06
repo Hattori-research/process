@@ -130,7 +130,7 @@ max_gap_sec   = 0.5   # これより長い記録の途切れ（マーカ見失�
 past_seq          = 36      # 過去ステップ数（18Hz で 2秒）
 future_seq        = 18      # 未来ステップ数（18Hz で 1秒）
 w_min             = 0.0     # コントローラ出力の引張量範囲 [mm]
-w_max             = 16.0    # コントローラ出力の上限。新しい引き方（上限 30mm）のデータで学習し直すときに 30 に上げる（今の重みのまま変えると出力が約2倍になる）
+w_max             = 30.0    # コントローラ出力の上限（2026-10-05 16→30。学習データは incremental でも累積 30mm まで引いており、16mm で切ると遠い目標に届かなかった。変えたらコントローラの再学習が必要。16mm の重みは Data/Weights/archive_wmax16_20261005/）
 cut_initial_steps = 90      # 各CSVの先頭で捨てるステップ数（18Hz で 5秒）
 movement_limit    = 120.0   # 初期位置からの座標クリップ幅 [mm]
 jump_thresh       = 150.0   # ウィンドウ内1ステップ変化量がこれを超えたらサンプル除外 [mm]
@@ -157,8 +157,8 @@ patience      = 20       # early stopping
 learning_rate = 1e-3
 weight_decay  = 1e-5
 grad_clip     = 1.0
-lambda_smooth = 0.2      # 手法A: 引張量のステップ間変化の罰則（[0,1] スケールの2乗平均に掛ける）
-lambda_prior  = 0.1      # 手法A: 記録引張量からのずれの罰則（[0,1] スケールの MSE に掛ける）
+lambda_smooth = 0.70     # 手法A: 引張量のステップ間変化の罰則（[0,1] スケールの2乗平均に掛ける。w_max=16 のとき 0.2 → w_max=30 で mm あたり同じ強さになるよう (30/16)^2 倍）
+lambda_prior  = 0.35     # 手法A: 記録引張量からのずれの罰則（[0,1] スケールの MSE に掛ける。w_max=16 のとき 0.1、同様に (30/16)^2 倍）
 lr_factor     = 0.5      # ReduceLROnPlateau
 lr_patience   = 5        # ReduceLROnPlateau
 train_ratio   = 0.8      # train / val 分割
