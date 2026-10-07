@@ -53,6 +53,10 @@ PATIENCE   = ccfg["patience"]
 GRAD_CLIP  = ccfg["grad_clip"]
 LAMBDA_SMOOTH = ccfg["lambda_smooth"]   # 手法A: 引張量の変化の罰則
 LAMBDA_PRIOR  = ccfg["lambda_prior"]    # 手法A: 記録引張量からのずれの罰則
+TRAJ_WEIGHT     = ccfg["traj_weight"]      # 手法A: 未来軌道全体の位置誤差の重み（1 = 従来）
+TERMINAL_WEIGHT = ccfg["terminal_weight"]  # 手法A: 最終ステップ（目標時刻）の位置誤差に追加する重み（0 = 従来）
+LAMBDA_STILL    = ccfg["lambda_still"]     # 手法A: 最後の still_steps ステップの予測移動量の罰則（到達して止まる。0 = 従来）
+STILL_STEPS     = ccfg["still_steps"]
 W_MIN, W_MAX = mcfg["w_min"], mcfg["w_max"]
 
 CUT_INITIAL_STEPS = mcfg["cut_initial_steps"]
@@ -165,7 +169,10 @@ def narx_loss(ctrl, narx, batch, device, w_mean, w_std):
     # NARX予測（NARXパラメータへの勾配は不要だがグラフは維持）
     pred = narx(x_narx, w_sc)                            # (B, F, 3)
     # 全ステップの損失（最終ステップだけでなく全体を使う）
-    pos_loss = nn.functional.mse_loss(pred, fut_pos)
+    pos_loss = (TRAJ_WEIGHT * nn.functional.mse_loss(pred, fut_pos)
+                + TERMINAL_WEIGHT * nn.functional.mse_loss(pred[:, -1], fut_pos[:, -1]))
+    if LAMBDA_STILL > 0:   # 目標時刻の手前で止まっているように（最後の区間の予測移動を小さく）
+        pos_loss = pos_loss + LAMBDA_STILL * (pred[:, -1] - pred[:, -1 - STILL_STEPS]).pow(2).mean()
 
     # 直前の実引張量（[0,1]）から出力の各ステップへの変化
     to01 = lambda w_std_sc: ((w_std_sc * w_std + w_mean - W_MIN) / (W_MAX - W_MIN)).clamp(0.0, 1.0)
@@ -401,7 +408,8 @@ def main():
     test_loader = DataLoader(ds_test, shuffle=False, **kw)
 
     print(f"Train:{len(ds_tr)}  Val:{len(ds_vl)}  Test:{len(ds_test)}")
-    print(f"手法A 正則化: lambda_smooth={LAMBDA_SMOOTH}  lambda_prior={LAMBDA_PRIOR}")
+    print(f"手法A 正則化: lambda_smooth={LAMBDA_SMOOTH}  lambda_prior={LAMBDA_PRIOR}  "
+          f"traj_weight={TRAJ_WEIGHT}  terminal_weight={TERMINAL_WEIGHT}  lambda_still={LAMBDA_STILL}（{STILL_STEPS}ステップ）")
 
     # ==========================================
     # 手法A: NARX間接学習

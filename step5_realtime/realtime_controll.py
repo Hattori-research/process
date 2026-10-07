@@ -71,6 +71,7 @@ INTEGRAL_START_MM = rcfg["integral_start_mm"]   # 目標までの距離がこれ
 MAX_DW_MM         = rcfg["max_dw_mm"]           # 1ステップあたりの引張量の変化の上限 [mm]（0 で無効）
 DW_PER_ERR        = rcfg["dw_per_err"]          # 目標の近くでの変化の上限 = この係数 × 目標までの距離 [mm/mm]（0 で無効）
 MIN_DW_MM         = rcfg["min_dw_mm"]           # 同 下限 [mm]
+HOLD_MM           = rcfg["hold_mm"]             # 目標までの距離がこれ未満のあいだは指令を変えない [mm]（0 で無効）
 STALL_PULL_MM     = rcfg["stall_pull_mm"]       # 異常検知：どれかのワイヤをこれ以上引いているのに [mm]
 STALL_MOVE_MM     = rcfg["stall_move_mm"]       # 試行開始からの移動がこれ未満の状態が [mm]
 STALL_SEC         = rcfg["stall_sec"]           # これだけ続いたら安全停止する [s]（ワイヤ外れ等の確認用）
@@ -228,12 +229,15 @@ def limit_command(w_next, w_prev, dist=None):
       上限 = MAX_DW_MM（急な引き込みによる飛び移りの抑制）
       dist（目標までの距離 [mm]）を渡すと、上限を min(MAX_DW_MM, max(MIN_DW_MM, DW_PER_ERR × dist)) にする
       → 目標の近くでは指令をゆっくり変え、到達後の行き来・行き過ぎを抑える
+      dist < HOLD_MM のあいだは指令を変えない（到達後に離れていくのを抑える。離れたら制御を再開）
     """
     w = np.clip(w_next, W_MIN, W_MAX)
     if MAX_DW_MM > 0:
         dw = MAX_DW_MM
         if dist is not None and DW_PER_ERR > 0:
             dw = min(MAX_DW_MM, max(MIN_DW_MM, DW_PER_ERR * dist))
+        if dist is not None and dist < HOLD_MM:
+            dw = 0.0
         w_prev = np.asarray(w_prev, dtype=float)
         w = np.clip(w, w_prev - dw, w_prev + dw)
     return w
