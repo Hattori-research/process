@@ -243,6 +243,13 @@ process/stepN_<内容>/<スクリプト>.py の形でステップごとに分け
   - 記録された引張量をそのまま入れたとき（1.59mm）と同等。差はほぼ 16mm 超が必要な窓で生じていた。指令も滑らかになった（16mm 超を出す割合 19.6%、最大 29.4mm）
   - 手法B も同じ条件で再学習（`w_max` に依存するため）。旧重みは `Data/Weights/archive_wmax16_20261005/`、ログ `Data/Weights/train_controller_log_wmax30_20261005.txt`
   - 20Hz 暫定データで学習した重みは `Data/Weights/archive_20hz_20260929/`
+- **修繕後データで NARX・コントローラを学習し直し（2026-10-07, 現行の重み）**: `raw/random_multi_30_20261006_183714.csv`（random_multi, 64800 サンプル・60.4分、実測 17.9Hz、W1 にたるみ防止部品、4本とも全時間で効きを確認）
+  → train 49372行 / test 15705行。修繕前の学習データは `Data/rnn_csv/archive_prerepair_18hz_20260929/`、重み・スケーラは `Data/Weights/archive_prerepair_20261006/`
+  - NARX: test 3D RMSE 2.39mm（X 1.67 / Y 1.44 / Z 0.91。修繕前データ 1.70mm より大きいのは random_multi の動きが大きく速いため）、early stopping で終了
+  - NARX シミュレーション（test 15276 窓、1秒後の目標との誤差）: 記録引張量 2.59mm / 保持 5.18mm / 動かない 11.10mm / **手法A 2.49mm（5mm超動く窓 3.29mm）** / 手法B 3.32mm（4.42mm）。ステップ間変化 A・B とも 0.25mm
+  - 手法B が保持より良くなった（修繕前データでは保持より悪かった）。random_multi は指令と動きの対応が incremental より一意に近いためと考えられる
+  - 位置の範囲は X −15〜18 / Y −82〜−27 / Z −44〜−9mm（5〜95%）。+Y 側は 0%（偏りは変わらず）。ログ `Data/Weights/train_rnn_log_postrepair_20261007.txt`, `train_controller_log_postrepair_20261007.txt`
+  - 実機試験は未実施（2026-10-07 夜、実験室の照明が消えていたため。照明下でカメラの確認をしてから行う）
 
 ## step5_realtime（実機リアルタイム制御） realtime_controll.py
 - 起動時にコントローラ（A/B）とモード（[1] testデータから20点サンプルした目標へのランダム追従 / [2] キーボードでXYZ入力）を選択
