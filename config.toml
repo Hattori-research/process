@@ -23,6 +23,7 @@ angle_scaler     = "Data/Weights/angle_scaler.pkl"
 rel_coord_scaler = "Data/Weights/rel_coord_scaler.pkl"
 control_results  = "Data/control_results"
 control_video    = "Data/control_results/video"
+control_plots    = "Data/control_results/plots"   # common/plot_control_results.py の出力先
 triangulation_check = "Data/triangulation_check"   # check_triangulation.py の記録先
 stop_file        = "Data/STOP"   # step5 実行中にこのファイルを作ると、自然長へ戻してから安全に停止する
 
